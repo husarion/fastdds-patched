@@ -46,7 +46,9 @@ Each release `v<N>` carries one package per distro and architecture under a stab
 
 ```dockerfile
 # The Fast DDS listener-slot fix (husarion/fastdds-patched). Every image whose
-# processes share the robot's /dev/shm ROS world needs it.
+# processes share the robot's /dev/shm ROS world needs it. The last three
+# checks prove it at build time: the patched package is installed, its files
+# are intact, and no other copy of the library exists for a process to load.
 ARG FASTDDS_PATCHED=v1
 ARG FASTDDS_SHA256_AMD64=<sha256 of fastrtps-jazzy-amd64.deb from SHA256SUMS>
 ARG FASTDDS_SHA256_ARM64=<sha256 of fastrtps-jazzy-arm64.deb from SHA256SUMS>
@@ -57,8 +59,6 @@ RUN set -eu; arch=$(dpkg --print-architecture); \
     echo "${sum}  /tmp/fastdds.deb" | sha256sum -c -; \
     apt-get update && apt-get install -y --no-install-recommends /tmp/fastdds.deb; \
     pkg=$(dpkg-deb -f /tmp/fastdds.deb Package); apt-mark hold "$pkg"; rm -f /tmp/fastdds.deb; \
-    # build-time proof: the patched package is installed, its files are intact,
-    # and no other copy of the library exists for a process to load instead
     dpkg-query -W -f='${Version}' "$pkg" | grep -q '+husarion' ; \
     dpkg --verify "$pkg"; \
     test "$(find / -xdev \( -name 'libfastrtps.so*' -o -name 'libfastdds.so*' \) -type f -not -path "/opt/ros/${ROS_DISTRO}/lib/*" | wc -l)" = 0; \
