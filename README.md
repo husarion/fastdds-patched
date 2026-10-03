@@ -42,23 +42,32 @@ A single unpatched process in the shared-memory world keeps writing into its sta
 
 ## Using the packages
 
-Each GitHub release carries the `.deb` files for every distro and architecture plus `SHA256SUMS`. Releases are private, so a build downloads with a read token passed as a BuildKit secret:
+Each release `v<N>` carries one package per distro and architecture under a stable name, `<package>-<distro>-<arch>.deb` (`fastrtps-jazzy-arm64.deb`, `fastrtps-humble-amd64.deb`, `fastdds-lyrical-amd64.deb`), plus `SHA256SUMS` and `VERSIONS` (the full package version of each file). An image pins the release and the checksum, so a rebuilt release can never slip in unnoticed:
 
 ```dockerfile
+# The Fast DDS listener-slot fix (husarion/fastdds-patched). Every image whose
+# processes share the robot's /dev/shm ROS world needs it.
 ARG FASTDDS_PATCHED=v1
-ARG FASTDDS_DEB=ros-jazzy-fastrtps_2.14.6-1noble.20260901.222814+husarion1_amd64.deb
-ARG FASTDDS_SHA256=<from SHA256SUMS>
-RUN --mount=type=secret,id=gh_token \
-    curl -fsSL -H "Authorization: Bearer $(cat /run/secrets/gh_token)" -H "Accept: application/octet-stream" \
-      -o /tmp/fastdds.deb "$(curl -fsSL -H "Authorization: Bearer $(cat /run/secrets/gh_token)" \
-        https://api.github.com/repos/husarion/fastdds-patched/releases/tags/${FASTDDS_PATCHED} \
-        | python3 -c "import json,sys; print([a['url'] for a in json.load(sys.stdin)['assets'] if a['name']=='${FASTDDS_DEB}'][0])")" \
- && echo "${FASTDDS_SHA256}  /tmp/fastdds.deb" | sha256sum -c - \
- && apt-get install -y /tmp/fastdds.deb && apt-mark hold "$(dpkg-deb -f /tmp/fastdds.deb Package)" \
- && rm /tmp/fastdds.deb
+ARG FASTDDS_SHA256_AMD64=<sha256 of fastrtps-jazzy-amd64.deb from SHA256SUMS>
+ARG FASTDDS_SHA256_ARM64=<sha256 of fastrtps-jazzy-arm64.deb from SHA256SUMS>
+RUN set -eu; arch=$(dpkg --print-architecture); \
+    case "$arch" in amd64) sum=$FASTDDS_SHA256_AMD64 ;; arm64) sum=$FASTDDS_SHA256_ARM64 ;; *) exit 1 ;; esac; \
+    curl -fsSL -o /tmp/fastdds.deb \
+      "https://github.com/husarion/fastdds-patched/releases/download/${FASTDDS_PATCHED}/fastrtps-${ROS_DISTRO}-${arch}.deb"; \
+    echo "${sum}  /tmp/fastdds.deb" | sha256sum -c -; \
+    apt-get update && apt-get install -y --no-install-recommends /tmp/fastdds.deb; \
+    pkg=$(dpkg-deb -f /tmp/fastdds.deb Package); apt-mark hold "$pkg"; rm -f /tmp/fastdds.deb; \
+    # build-time proof: the patched package is installed, its files are intact,
+    # and no other copy of the library exists for a process to load instead
+    dpkg-query -W -f='${Version}' "$pkg" | grep -q '+husarion' ; \
+    dpkg --verify "$pkg"; \
+    test "$(find / -xdev \( -name 'libfastrtps.so*' -o -name 'libfastdds.so*' \) -type f -not -path "/opt/ros/${ROS_DISTRO}/lib/*" | wc -l)" = 0; \
+    rm -rf /var/lib/apt/lists/*
 ```
 
-If the image already has a newer Fast DDS than the package (the ROS repository synced a new version), apt refuses the downgrade and the build fails: build a new release for that version rather than shipping the stock library. The hold keeps a later `apt-get upgrade` from replacing the package.
+Lyrical's package is `fastdds` (`fastdds-lyrical-<arch>.deb`). `apt-get install` takes no extra packages: the patched package declares exactly the stock package's dependencies, which every image with the stock package already has. If the image already carries a newer Fast DDS than the patched package (the ROS repository synced a new version), apt refuses the downgrade and the build fails: build a new release for that version rather than ship the stock library. The hold keeps a later `apt-get upgrade` from replacing it.
+
+For a private repository, the download needs a read token passed as a BuildKit secret (`RUN --mount=type=secret,id=gh_token`) and the API's asset URL with `Accept: application/octet-stream`; with a public repository the plain URL above works from any build host.
 
 ## Building and testing locally
 

@@ -48,7 +48,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
+          # Stable asset names (no version, no "+"): <package>-<distro>-<arch>.deb,
+          # e.g. fastrtps-jazzy-arm64.deb; the full version is inside the package
+          # and in VERSIONS.
+          : > VERSIONS
+          for f in ros-*.deb; do
+            pkg=$(dpkg-deb -f "$f" Package); arch=$(dpkg-deb -f "$f" Architecture)
+            distro=$(echo "$pkg" | cut -d- -f2); name="${pkg#ros-*-}-${distro}-${arch}.deb"
+            echo "$name $pkg $(dpkg-deb -f "$f" Version)" >> VERSIONS
+            mv "$f" "$name"
+          done
           sha256sum ./*.deb | sed 's| \./| |' > SHA256SUMS
+          cat VERSIONS
           cat SHA256SUMS
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" --notes-file ../RELEASE_NOTES.md ./*.deb SHA256SUMS
+            --title "${GITHUB_REF_NAME}" --notes-file ../RELEASE_NOTES.md ./*.deb SHA256SUMS VERSIONS
