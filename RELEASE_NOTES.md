@@ -1,0 +1,1 @@
+Fast DDS with the shared-memory listener fix (see the README): one package per ROS 2 release and architecture, each a drop-in replacement for the ROS apt package of the same version with `+husarion1` appended. Verify downloads against `SHA256SUMS`.

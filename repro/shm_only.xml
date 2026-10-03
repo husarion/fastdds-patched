@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Shared-memory-only participants, as on a robot whose ROS world never
+     touches a network: discovery and data both go over /dev/shm. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>shm_only</transport_id>
+      <type>SHM</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="shm_only_participant" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports><transport_id>shm_only</transport_id></userTransports>
+    </rtps>
+  </participant>
+</profiles>

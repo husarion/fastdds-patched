@@ -1,0 +1,26 @@
+From: Husarion <support@husarion.com>
+Subject: [PATCH] SHM: a regenerated listener keeps its new slot index
+
+SharedMemManager::Listener::regenerate_port() builds a new Listener, whose
+constructor registers it on the regenerated port and stores the new slot in
+listener_index_, then move-assigns it into *this. The move assignment copied
+the ring listener, the port and the manager but not listener_index_, so the
+surviving listener kept writing its liveness status into its OLD slot on the
+new segment. A participant that later takes that slot can die without the
+port watchdog noticing (a survivor keeps the slot's counter moving): its ring
+registration is never removed, the discovery port's ring fills, every push
+fails ("Port full") while is_port_ok stays true, and new participants on the
+host can no longer be discovered. Present in every release since 2.0.0
+(checked: 2.6.x, 2.14.x, 3.0.0-3.6.2, master).
+
+---
+--- a/src/cpp/rtps/transport/shared_mem/SharedMemManager.hpp
++++ b/src/cpp/rtps/transport/shared_mem/SharedMemManager.hpp
+@@ -689,6 +689,7 @@
+             other.global_listener_.reset();
+             global_port_ = other.global_port_;
+             other.global_port_.reset();
++            listener_index_ = other.listener_index_;
+             shared_mem_manager_ = other.shared_mem_manager_;
+             is_closed_.exchange(other.is_closed_);
+ 

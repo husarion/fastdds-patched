@@ -1,0 +1,5 @@
+fastdds-patched builds Debian packages of eProsima Fast DDS
+(https://github.com/eProsima/Fast-DDS), Copyright eProsima, licensed under the
+Apache License 2.0, from the ROS 2 buildfarm's source packages
+(packages.ros.org). The patches under patches/ are Husarion's modifications
+of that source, under the same license.

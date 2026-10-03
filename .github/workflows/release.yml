@@ -1,0 +1,54 @@
+# A tag v<N> builds the patched Fast DDS packages for every release in
+# distros.env on amd64 and arm64 (native runners), proves on each architecture
+# that the stock package closes a shared-memory world and the patched one
+# keeps it open, and only then publishes one GitHub release carrying every
+# .deb and a SHA256SUMS file.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [humble, jazzy, lyrical]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the patched package
+        run: ./build.sh ${{ matrix.distro }} out
+      - name: The stock package closes the world
+        run: repro/closed_world.sh ${{ matrix.distro }}
+      - name: The patched package keeps it open
+        run: repro/closed_world.sh ${{ matrix.distro }} out/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.distro }}-${{ matrix.runner }}
+          path: out/*.deb
+          if-no-files-found: error
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum ./*.deb | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" --notes-file ../RELEASE_NOTES.md ./*.deb SHA256SUMS
