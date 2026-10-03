@@ -21,6 +21,21 @@ The fix is one line, in `patches/<upstream version>/`:
 
 The change is inside a private header, so the library's ABI does not change.
 
+## Evidence
+
+`repro/closed_world.sh` on amd64, 2026-10-03, stock package against the patched one:
+
+| Release | Package | Second death | Verdict |
+|---|---|---|---|
+| Humble | ros-humble-fastrtps 2.6.12 | not noticed | closed 100 s after the load |
+| Humble | 2.6.12 `+husarion1` | noticed | open after 600 s |
+| Jazzy | ros-jazzy-fastrtps 2.14.6 | not noticed | closed 134 s after the load |
+| Jazzy | 2.14.6 `+husarion1` | noticed | open after 600 s |
+| Lyrical | ros-lyrical-fastdds 3.6.2 | not noticed | closed 135 s after the load |
+| Lyrical | 3.6.2 `+husarion1` | noticed | open after 600 s |
+
+On a Lynx (UGV OS, arm64), the stock world closed 11 of 11 times under two SIGKILLs of one participant followed by a graceful restart.
+
 ## Every process needs it
 
 A single unpatched process in the shared-memory world keeps writing into its stale slot, so the world stays exposed. Install the package in every image whose processes share the robot's `/dev/shm` world: the driver, rosbridge, cameras, the airlock halves and anything else, including the `ros2` CLI that runs inside those containers.
