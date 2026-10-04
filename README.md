@@ -83,6 +83,16 @@ The controls of `blocked_sender.sh` recover on the stock package: the same in-se
 
 On the Lynx, every process of the robot's shared-memory world was hotpatched with each package. One process was SIGKILLed 3 s into its start, after being stopped and having its own ports' listener slots marked as processing (what a process killed mid-message leaves behind); the rest was left to the robot's timing. With `+husarion3` (fixes 1 and 2), a process was left wedged and stranded in 4 of 11 rounds. Each time, its event thread was waiting on the dead port's mutex, which it held itself. With `+husarion4`, this happened in 0 of 23 rounds. The plain kill without the mark split 3 of 10 rounds with `+husarion3` on 2026-10-03 and 0 of 10 on 2026-10-04.
 
+The UGV OS release candidate of 2026-10-04 (every robot-world process on v1) split its world once more, after a graceful restart of the airlock's robot half: a second participant exec'd into the half's container died by SIGKILL with it, and two driver processes were left on unlinked segments of the discovery port with their listeners stuck in processing, their own ports removed by their peers. `repro/restart_world.sh` models that sequence in one container: root participants, a uid-10001 "half" restarted with SIGTERM, a side participant SIGKILLed 0.4 s later, and short-lived `ros2 topic echo` participants ended by SIGTERM or SIGKILL. With `LEVER=forced` (the side participant dies with its listeners marked processing, and the in-send flip of `blocked_sender.sh`), Jazzy amd64:
+
+| Package | `restart_world.sh`, `LEVER=forced` |
+|---|---|
+| stock 2.14.6 | STRANDED 8 of 8: the publisher whose send was caught strands on the old discovery segments, keeps its own ports' locks after its peers removed the ports, and holds the dead port's mutex with its own thread |
+| `+husarion1` (v1) | STRANDED 8 of 8, the same three marks |
+| `+husarion4` (v2) | WHOLE 0 of 8 |
+
+Without the flip, the world's own timing in the container strands no round on any package (stock 0 of 16, v1 0 of 16, `+husarion4` 0 of 158, 64 of them with `docker update --cpuset-cpus` bursts during the restart; with the processing mark alone 0 of 12 each); the lever stands in for the robot's timing, which caught the same path in 4 of 11 rounds without 0003. An earlier version of the model let the `ros2` daemon, which the CLI participants spawn, survive into the next round's world after its files were deleted; that version stranded idle participants on every package (4 of 100 rounds, none since in 226), so the model now kills the daemon every round and those rounds are no reading of the packages.
+
 ## Every process needs it
 
 A single unpatched process in the shared-memory world keeps writing into its stale slot (fix 1), resets a dead owner's port mutex without the file lock (fix 2) or can spin in the recovery loop (fix 3), so the world stays exposed. Install the package in every image whose processes share the robot's `/dev/shm` world: the driver, rosbridge, cameras, the airlock halves and anything else, including the `ros2` CLI that runs inside those containers.
@@ -126,6 +136,8 @@ repro/split_world.sh jazzy                         # stock: the world must split
 repro/split_world.sh jazzy out/jazzy/*.deb         # patched: it must stay whole for 8 (exit 0)
 repro/blocked_sender.sh jazzy                      # stock: a sender must wedge (exit 0)
 repro/blocked_sender.sh jazzy out/jazzy/*.deb      # patched: it must recover (exit 0)
+LEVER=forced CASES=4 repro/restart_world.sh jazzy                  # stock: the restart sequence strands a sender (exit 0)
+LEVER=forced CASES=4 repro/restart_world.sh jazzy out/jazzy/*.deb  # patched: the world stays whole (exit 0)
 ```
 
 Each reproducer reads the expected verdict from the package changelog (the subject of every patch is written into it), so a package with an older patch set is expected to fail the newer reproducers. `blocked_sender.sh` installs gdb in its container (network for apt) and needs `SYS_PTRACE`; `locks.py`, `plant.py` and `wedge.py` read and plant the port state the reproducers use and work on a live host too.
