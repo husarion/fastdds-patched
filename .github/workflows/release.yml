@@ -1,8 +1,11 @@
 # A tag v<N> builds the patched Fast DDS packages for every release in
 # distros.env on amd64 and arm64 (native runners), proves on each architecture
 # that the stock package fails each reproducer (a closed world, a split world, a
-# wedged sender) and the patched one passes all three, and only then publishes one GitHub release carrying every
-# .deb and a SHA256SUMS file.
+# wedged sender) and the patched one passes all three, and only then publishes
+# one GitHub release carrying every .deb and a SHA256SUMS file. The split is a
+# race: a stock round splits about one time in three, so the stock run stops at
+# its first split and allows up to 48 rounds; the patched run must stay whole
+# in all of its 8 (repro/split_world.sh has the numbers).
 name: release
 on:
   push:
@@ -26,9 +29,9 @@ jobs:
         run: repro/closed_world.sh ${{ matrix.distro }}
       - name: The patched package keeps it open
         run: repro/closed_world.sh ${{ matrix.distro }} out/*.deb
-      - name: The stock package splits the world (port mutex reset)
+      - name: The stock package splits the world (port mutex reset; first split of up to 48 rounds)
         run: repro/split_world.sh ${{ matrix.distro }}
-      - name: The patched package keeps it whole
+      - name: The patched package keeps it whole (8 of 8 rounds)
         run: repro/split_world.sh ${{ matrix.distro }} out/*.deb
       - name: The stock package wedges a sender (recover loop)
         run: repro/blocked_sender.sh ${{ matrix.distro }}

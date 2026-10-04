@@ -41,8 +41,9 @@ PY
 # with DAC_OVERRIDE): two publishers and one newcomer run as such a user.
 AS=(setpriv --reuid=10001 --regid=10001 --clear-groups --inh-caps=+dac_override,+dac_read_search --ambient-caps=+dac_override,+dac_read_search)
 newcomer() { timeout -s INT -k 5 30 "$@" ros2 topic list --no-daemon --spin-time 3 2>/dev/null | grep -c '^/w'; }
-split=0; broken=0
+split=0; broken=0; ran=0
 for r in $(seq 1 "$CASES"); do
+  ran=$r
   rm -f /dev/shm/fast* /dev/shm/sem.fast* 2>/dev/null
   PIDS=()
   for i in $(seq 1 8); do "$CC" --ros-args -r __node:=cc$i >/dev/null 2>&1 & PIDS+=($!); sleep 0.3; done
@@ -62,8 +63,10 @@ for r in $(seq 1 "$CASES"); do
   if [ -z "$s" ] && { [ "$n1" -lt 10 ] && [ "$n2" -lt 10 ] || [ "$u1" -lt 10 ]; }; then broken=$((broken + 1)); v=BROKEN; fi
   echo "round $r: $v stranded=[$s] newcomer sees $n1 and $n2 of 10 publishers, as uid 10001 $u1"
   kill -9 "${PIDS[@]}" 2>/dev/null; wait 2>/dev/null; sleep 1
+  # UNTIL_SPLIT=1 (the stock run): one split proves the bug, stop there.
+  [ "${UNTIL_SPLIT:-0}" = 1 ] && [ "$split" -gt 0 ] && break
 done
-if [ "$split" -gt 0 ]; then echo "VERDICT: SPLIT ($split of $CASES rounds, $broken more broken)"
-elif [ "$broken" -gt 0 ]; then echo "VERDICT: BROKEN ($broken of $CASES rounds: newcomers miss publishers without a split)"
-else echo "VERDICT: WHOLE (0 of $CASES rounds)"; fi
+if [ "$split" -gt 0 ]; then echo "VERDICT: SPLIT ($split of $ran rounds, $broken more broken)"
+elif [ "$broken" -gt 0 ]; then echo "VERDICT: BROKEN ($broken of $ran rounds: newcomers miss publishers without a split)"
+else echo "VERDICT: WHOLE (0 of $ran rounds)"; fi
 exit 0

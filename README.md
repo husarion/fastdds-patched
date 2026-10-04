@@ -63,18 +63,21 @@ v2, 2026-10-03 and 2026-10-04. `repro/split_world.sh` (fix 2: eighteen participa
 
 | Release | Architecture | Package | split_world.sh | blocked_sender.sh |
 |---|---|---|---|---|
-| Jazzy | amd64 | stock 2.14.6 | SPLIT 4 of 8 | WEDGED 4 of 4 |
+| Humble | amd64 | stock 2.6.12 | SPLIT 7 of 24 (runs of 8: 2, 5, 0) | WEDGED 6 of 6 |
+| Humble | amd64 | `+husarion4` | WHOLE 0 of 16 | RECOVERED 0 of 6 |
+| Jazzy | amd64 | stock 2.14.6 | SPLIT 6 of 24 (2, 1, 3; 4 of 8 on 2026-10-03) | WEDGED 4 of 4 |
 | Jazzy | amd64 | `+husarion3` (fixes 1, 2) | WHOLE 0 of 8 | WEDGED 4 of 4 |
-| Jazzy | amd64 | `+husarion4` (v2) | WHOLE 0 of 8 (a first run, beside a package build, read one uid-10001 newcomer at 9 of 10: BROKEN 1 of 8) | RECOVERED 0 of 6 |
-| Humble | amd64 | stock 2.6.12 | SPLIT (v1: 5 of 8) | WEDGED 6 of 6 |
-| Humble | amd64 | `+husarion4` | WHOLE 0 of 8 | RECOVERED 0 of 6 |
-| Lyrical | amd64 | stock 3.6.2 | SPLIT (v1: 2 of 8) | WEDGED 6 of 6 |
-| Lyrical | amd64 | `+husarion4` | WHOLE 0 of 8 | RECOVERED 0 of 6 |
-| Jazzy | arm64 | stock | SPLIT (v1: 2 of 8) | WEDGED 6 of 6 |
-| Jazzy | arm64 | `+husarion4` | WHOLE 0 of 8 | RECOVERED 0 of 6 |
-| Lyrical | arm64 | stock | SPLIT (v1: 1 of 8) | WEDGED 6 of 6 |
-| Lyrical | arm64 | `+husarion4` | WHOLE 0 of 8 | RECOVERED 0 of 6 |
-| Humble | arm64 | stock / `+husarion4` | (not run) / WHOLE 0 of 8 | WEDGED 6 of 6 / RECOVERED 0 of 6 |
+| Jazzy | amd64 | `+husarion4` (v2) | WHOLE 0 of 24 (a first run, beside a package build, read one uid-10001 newcomer at 9 of 10: BROKEN 1 of 8) | RECOVERED 0 of 6 |
+| Lyrical | amd64 | stock 3.6.2 | SPLIT 6 of 24 (3, 1, 2) | WEDGED 6 of 6 |
+| Lyrical | amd64 | `+husarion4` | WHOLE 0 of 16 | RECOVERED 0 of 6 |
+| Humble | arm64 | stock | SPLIT 13 of 24 (4, 4, 5) | WEDGED 6 of 6 |
+| Humble | arm64 | `+husarion4` | WHOLE 0 of 24 | RECOVERED 0 of 6 |
+| Jazzy | arm64 | stock | SPLIT 6 of 24 (1, 2, 3) | WEDGED 6 of 6 |
+| Jazzy | arm64 | `+husarion4` | WHOLE 0 of 24 | RECOVERED 0 of 6 |
+| Lyrical | arm64 | stock | SPLIT 9 of 24 (3, 3, 3) | WEDGED 6 of 6 |
+| Lyrical | arm64 | `+husarion4` | WHOLE 0 of 24 | RECOVERED 0 of 6 |
+
+The split is a race: a stock round splits 6 to 13 times in 24 per cell (amd64 on the lab NUC, arm64 on a 10-core VM, 2026-10-04), and one 8-round stock run on Humble amd64 read WHOLE. A fixed 8-round stock run would therefore turn the release workflow red now and then on a step that says nothing about the fix. The stock run of `split_world.sh` stops at its first split and allows up to 48 rounds: at the lowest measured rate (6 of 24) it misses with a probability below 1e-5, and below 1 % even at 0.10, the 95 % lower bound of that rate. With the change, stock runs on amd64 split at round 4 (Humble), 1 (Jazzy) and 10 (Lyrical). The patched run stays strict: 8 rounds, no split and no broken round. The rates on GitHub's runners are not measured; `CASES` sets the round count of either run. `blocked_sender.sh` needs no such margin: the stock package wedged in all 34 of its rounds across the six cells (and in the 4 of `+husarion3`), and one wedged round of six is enough.
 
 The controls of `blocked_sender.sh` recover on the stock package: the same in-send flip without the processing mark (`LEVER=flip`, 0 of 4) and a plain kill (`LEVER=none`, 0 of 4). `closed_world.sh` keeps reading OPEN on `+husarion4` (Humble, Jazzy, Lyrical amd64).
 
@@ -119,8 +122,8 @@ For a private repository, the download needs a read token passed as a BuildKit s
 ./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion4_<arch>.deb
 repro/closed_world.sh jazzy                        # stock: the world must close (exit 0)
 repro/closed_world.sh jazzy out/jazzy/*.deb        # patched: it must stay open (exit 0)
-repro/split_world.sh jazzy                         # stock: the world must split (exit 0)
-repro/split_world.sh jazzy out/jazzy/*.deb         # patched: it must stay whole (exit 0)
+repro/split_world.sh jazzy                         # stock: the world must split within 48 rounds (exit 0)
+repro/split_world.sh jazzy out/jazzy/*.deb         # patched: it must stay whole for 8 (exit 0)
 repro/blocked_sender.sh jazzy                      # stock: a sender must wedge (exit 0)
 repro/blocked_sender.sh jazzy out/jazzy/*.deb      # patched: it must recover (exit 0)
 ```
