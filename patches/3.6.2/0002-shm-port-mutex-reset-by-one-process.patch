@@ -1,0 +1,208 @@
+From: Husarion <support@husarion.com>
+Subject: [PATCH] SHM: only one process resets a port mutex whose owner died
+
+A port's named mutex (<domain>_port<N>_mutex, a POSIX semaphore) serializes
+every open, regeneration and removal of the port's segment. When its owner
+dies holding it (a participant SIGKILLed inside open_port_internal, which
+holds it through healthy_check), every process that then needs the port waits
+2 s, removes the name, creates a mutex of its own and locks it. A port
+regeneration makes every participant on the host wait at once, so they time
+out within the same second, each holds a different mutex, and
+open_port_internal runs in several processes at the same time: one removes
+the segment another has just created, and the discovery port ends as several
+segments, each still marked ok, with listeners stranded on the unlinked ones.
+Participants on different segments no longer hear each other's announcements
+and a newcomer sees only part of the world, until every process restarts.
+
+The port paths now take the mutex through *_robust_named_mutex(): every
+holder first holds a kernel flock on the file <domain>_port<N>_mutex_holder in
+the lock directory, released right after the mutex. The kernel releases it
+when its holder dies, so the process that times out on the mutex holds the
+file lock and is the only one resetting the mutex; the others wait for the
+file lock (up to 10 s for a live holder, then fail as before). The file is
+never removed. A process without this patch does not take the file lock and
+behaves as before. The ABI does not change (private headers only).
+
+---
+--- a/src/cpp/rtps/transport/shared_mem/SharedMemGlobal.hpp
++++ b/src/cpp/rtps/transport/shared_mem/SharedMemGlobal.hpp
+@@ -485,7 +485,7 @@
+                     if (node_->is_port_ok)
+                     {
+                         deleted_unique_ptr<SharedMemSegment::named_mutex> port_mutex =
+-                                SharedMemSegment::try_open_and_lock_named_mutex(segment_name + "_mutex");
++                                SharedMemSegment::try_open_and_lock_robust_named_mutex(segment_name + "_mutex");
+ 
+                         std::unique_lock<SharedMemSegment::named_mutex> port_lock(*port_mutex, std::adopt_lock);
+ 
+@@ -1060,7 +1060,7 @@
+                                                        << port_segment_name);
+ 
+         deleted_unique_ptr<SharedMemSegment::named_mutex> port_mutex =
+-                SharedMemSegment::open_or_create_and_lock_named_mutex(port_segment_name + "_mutex");
++                SharedMemSegment::open_or_create_and_lock_robust_named_mutex(port_segment_name + "_mutex");
+ 
+         std::unique_lock<SharedMemSegment::named_mutex> port_lock(*port_mutex, std::adopt_lock);
+ 
+--- a/src/cpp/utils/shared_memory/SharedMemSegment.hpp
++++ b/src/cpp/utils/shared_memory/SharedMemSegment.hpp
+@@ -40,7 +40,19 @@
+ #include <boost/interprocess/offset_ptr.hpp>
+ #include <boost/thread/thread_time.hpp>
+ 
++#include <chrono>
++#include <cstring>
++#include <thread>
++
++#if !defined(_MSC_VER) && !defined(MINGW_COMPILER)
++#include <fcntl.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif // if !defined(_MSC_VER) && !defined(MINGW_COMPILER)
++
+ #include "BoostAtExitRegistry.hpp"
++#include "SharedDir.hpp"
+ #include "RobustInterprocessCondition.hpp"
+ #include "SharedMemUUID.hpp"
+ 
+@@ -180,6 +192,139 @@
+         return named_mutex;
+     }
+ 
++    /**
++     * open_or_create_and_lock_named_mutex() for a mutex whose owner may die
++     * holding it (a shared-memory port's mutex): every holder first holds a
++     * kernel lock on a file of its own (HolderFile), released right after the
++     * mutex. The kernel drops that lock when its holder dies, so the process that
++     * times out on the named mutex knows its owner is dead (or is a process
++     * without this lock) and is the only one removing and recreating it. Without
++     * the file lock, every process that waits on a dead owner's mutex times out
++     * on its own, removes the name and locks a fresh mutex of its own, and
++     * several processes then open, remove and create the same port at once.
++     */
++    static deleted_unique_ptr<SharedSegmentBase::named_mutex> open_or_create_and_lock_robust_named_mutex(
++            const std::string& mutex_name)
++    {
++        HolderFile holder(mutex_name, BOOST_INTERPROCESS_TIMEOUT_WHEN_LOCKING_DURATION_MS * 10);
++        return holder.attach(open_or_create_and_lock_named_mutex(mutex_name));
++    }
++
++    /**
++     * try_open_and_lock_named_mutex() under the same file lock as
++     * open_or_create_and_lock_robust_named_mutex().
++     */
++    static deleted_unique_ptr<SharedSegmentBase::named_mutex> try_open_and_lock_robust_named_mutex(
++            const std::string& mutex_name)
++    {
++        HolderFile holder(mutex_name, BOOST_INTERPROCESS_TIMEOUT_WHEN_LOCKING_DURATION_MS * 2);
++        return holder.attach(try_open_and_lock_named_mutex(mutex_name));
++    }
++
++    /**
++     * A kernel lock (flock) on the file <mutex name>_holder in the lock
++     * directory. Waits up to timeout_ms for a live holder and throws after that:
++     * it never takes the lock from a live holder. The file is never removed.
++     */
++    class HolderFile
++    {
++    public:
++
++        HolderFile(
++                const std::string& mutex_name,
++                uint32_t timeout_ms)
++        {
++#if !defined(_MSC_VER) && !defined(MINGW_COMPILER)
++            const std::string path = SharedDir::get_lock_path(mutex_name + "_holder");
++            auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++            while (true)
++            {
++                // Open an existing file without O_CREAT: in a sticky shared directory
++                // (/dev/shm) the kernel refuses O_CREAT on a file another user owns
++                // (fs.protected_regular), whatever the capabilities, and processes of
++                // several users share one port.
++                fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
++                if (fd_ == -1 && errno == ENOENT)
++                {
++                    fd_ = ::open(path.c_str(), O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
++                    if (fd_ == -1 && errno == EEXIST)
++                    {
++                        continue; // created by another process meanwhile: open that one
++                    }
++                }
++                if (fd_ == -1)
++                {
++                    throw std::runtime_error("Couldn't open " + path + ": " + std::strerror(errno));
++                }
++                if (0 == ::flock(fd_, LOCK_EX | LOCK_NB))
++                {
++                    // The lock counts only on the file the name points to now.
++                    struct stat locked = {};
++                    struct stat named = {};
++                    if (0 == ::fstat(fd_, &locked) && 0 == ::stat(path.c_str(), &named) &&
++                            locked.st_ino == named.st_ino && locked.st_dev == named.st_dev)
++                    {
++                        return;
++                    }
++                }
++                ::close(fd_);
++                fd_ = -1;
++                if (std::chrono::steady_clock::now() >= deadline)
++                {
++                    throw std::runtime_error("Couldn't lock " + path + ": held by a live process");
++                }
++                std::this_thread::sleep_for(std::chrono::milliseconds(5));
++            }
++#else
++            (void)mutex_name;
++            (void)timeout_ms;
++#endif // if !defined(_MSC_VER) && !defined(MINGW_COMPILER)
++        }
++
++        ~HolderFile()
++        {
++            release(fd_);
++        }
++
++        /**
++         * Hands the file lock to the returned pointer, which releases it right
++         * after the named mutex object is destroyed.
++         */
++        template<class NamedMutexPtr>
++        deleted_unique_ptr<SharedSegmentBase::named_mutex> attach(
++                NamedMutexPtr&& named_mutex)
++        {
++            auto deleter = named_mutex.get_deleter();
++            int fd = fd_;
++            fd_ = -1;
++            return deleted_unique_ptr<SharedSegmentBase::named_mutex>(
++                named_mutex.release(),
++                [fd, deleter](SharedSegmentBase::named_mutex* p)
++                {
++                    deleter(p);
++                    release(fd);
++                });
++        }
++
++    private:
++
++        static void release(
++                int fd)
++        {
++#if !defined(_MSC_VER) && !defined(MINGW_COMPILER)
++            if (fd != -1)
++            {
++                ::flock(fd, LOCK_UN);
++                ::close(fd);
++            }
++#else
++            (void)fd;
++#endif // if !defined(_MSC_VER) && !defined(MINGW_COMPILER)
++        }
++
++        int fd_ = -1;
++    };
++
+     static deleted_unique_ptr<SharedSegmentBase::named_mutex> open_or_create_named_mutex(
+             const std::string& mutex_name)
+     {

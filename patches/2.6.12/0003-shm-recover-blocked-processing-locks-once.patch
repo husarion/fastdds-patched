@@ -1,0 +1,52 @@
+From: Husarion <support@husarion.com>
+Subject: [PATCH] SHM: recovering a dead listener's buffers locks the port mutex once
+
+When a sender finds a port marked not ok, SharedMemManager::Port::try_push()
+regenerates it, and for a zombie port (its listener's process died) it first
+runs recover_blocked_processing(), which calls
+SharedMemGlobal::Port::get_and_remove_blocked_processing() until no listener
+is marked as processing a buffer. That function holds the port's
+empty_cv_mutex and calls listener_processing_stop(), which locks the same
+non-recursive mutex again: the inner lock times out after
+BOOST_INTERPROCESS_TIMEOUT_WHEN_LOCKING_DURATION_MS (1 s), its exception is
+swallowed, the slot stays marked as processing, the function returns true,
+and the loop calls it again, forever. A participant that died between taking
+a message and finishing it leaves exactly such a slot, so the next sender to
+regenerate its port spins in that loop holding the mutex, inside the send
+path: the participant's send resources stay locked, nothing it publishes
+reaches anyone, and its discovery listener blocks as soon as it has to send
+or create sender resources, so it never follows the discovery port when the
+other processes regenerate it. Present in 2.6.x, 2.14.x and 3.x.
+
+get_and_remove_blocked_processing() now clears the flag under the lock it
+already holds, and recover_blocked_processing() stops after one pass over the
+listener table. Private headers only, no change to the shared-memory layout.
+
+---
+--- a/src/cpp/rtps/transport/shared_mem/SharedMemGlobal.hpp
++++ b/src/cpp/rtps/transport/shared_mem/SharedMemGlobal.hpp
+@@ -798,7 +798,9 @@
+                             node_->listeners_status[i].is_processing)
+                     {
+                         buffer_descriptor = node_->listeners_status[i].descriptor;
+-                        listener_processing_stop(i);
++                        // empty_cv_mutex is already held here: listener_processing_stop() would
++                        // lock it again, time out and leave the slot marked as processing.
++                        node_->listeners_status[i].is_processing = false;
+                         return true;
+                     }
+                 }
+--- a/src/cpp/rtps/transport/shared_mem/SharedMemManager.hpp
++++ b/src/cpp/rtps/transport/shared_mem/SharedMemManager.hpp
+@@ -929,7 +929,10 @@
+             if (SharedMemGlobal::Port::is_zombie(global_port_->port_id(),
+                     shared_mem_manager_->global_segment()->domain_name()))
+             {
+-                while (global_port_->get_and_remove_blocked_processing(buffer_descriptor))
++                // Each call clears one slot: one pass over the listener table is enough,
++                // and a bound keeps a slot that cannot be cleared from spinning forever.
++                for (uint32_t pass = 0; pass < SharedMemGlobal::PortNode::LISTENERS_STATUS_SIZE &&
++                        global_port_->get_and_remove_blocked_processing(buffer_descriptor); ++pass)
+                 {
+                     auto segment = shared_mem_manager_->find_segment(buffer_descriptor.source_segment_id);
+                     if (!segment)

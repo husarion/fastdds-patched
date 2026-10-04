@@ -4,14 +4,16 @@
 # ros-<distro>-fastdds (Lyrical) from its own source package with every patch
 # under patches/<upstream version>/, for the architecture of this host, and
 # writes the .deb to <outdir> (default out/<distro>/). The version is the
-# installed binary version of the pinned base image plus "+husarion1", so it
-# sorts above the package it replaces.
+# installed binary version of the pinned base image plus "+husarion<N>", so it
+# sorts above the package it replaces: v1 was +husarion1 (0001), v2 is
+# +husarion4 (0001-0003; +husarion2 and +husarion3 were unreleased test builds,
+# and the +husarion2 one is broken, so the name is never reused).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 DISTRO=${1:?usage: build.sh <distro> [outdir]}
 OUT=$(realpath -m "${2:-$HERE/out/$DISTRO}")
 read -r _ PKG DIGEST < <(grep -E "^$DISTRO " "$HERE/distros.env") || { echo "unknown distro $DISTRO" >&2; exit 2; }
-SUFFIX=${SUFFIX:-+husarion1}
+SUFFIX=${SUFFIX:-+husarion4}
 mkdir -p "$OUT"
 docker run --rm -e DISTRO="$DISTRO" -e PKG="$PKG" -e SUFFIX="$SUFFIX" -e HOST_UID="$(id -u)" \
   -v "$HERE/patches:/patches:ro" -v "$HERE/scripts:/scripts:ro" -v "$OUT:/out" \

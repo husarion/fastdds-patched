@@ -1,7 +1,7 @@
 # A tag v<N> builds the patched Fast DDS packages for every release in
 # distros.env on amd64 and arm64 (native runners), proves on each architecture
-# that the stock package closes a shared-memory world and the patched one
-# keeps it open, and only then publishes one GitHub release carrying every
+# that the stock package fails each reproducer (a closed world, a split world, a
+# wedged sender) and the patched one passes all three, and only then publishes one GitHub release carrying every
 # .deb and a SHA256SUMS file.
 name: release
 on:
@@ -26,6 +26,14 @@ jobs:
         run: repro/closed_world.sh ${{ matrix.distro }}
       - name: The patched package keeps it open
         run: repro/closed_world.sh ${{ matrix.distro }} out/*.deb
+      - name: The stock package splits the world (port mutex reset)
+        run: repro/split_world.sh ${{ matrix.distro }}
+      - name: The patched package keeps it whole
+        run: repro/split_world.sh ${{ matrix.distro }} out/*.deb
+      - name: The stock package wedges a sender (recover loop)
+        run: repro/blocked_sender.sh ${{ matrix.distro }}
+      - name: The patched package recovers it
+        run: repro/blocked_sender.sh ${{ matrix.distro }} out/*.deb
       - uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.distro }}-${{ matrix.runner }}
