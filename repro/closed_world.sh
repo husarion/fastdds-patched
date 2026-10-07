@@ -17,15 +17,17 @@ ROOT=$(cd "$HERE/.." && pwd)
 DISTRO=${1:?usage: closed_world.sh <distro> [deb]}
 DEB=${2:-}
 WAIT_S=${WAIT_S:-600}
-read -r _ _ DIGEST < <(grep -E "^$DISTRO " "$ROOT/distros.env") || { echo "unknown distro $DISTRO" >&2; exit 2; }
+read -r _ PKG DIGEST PIN < <(grep -E "^$DISTRO " "$ROOT/distros.env") || { echo "unknown distro $DISTRO" >&2; exit 2; }
 mounts=(-v "$HERE:/repro:ro")
+# MIX_DEB: a second package for the uid-10001 participants (repro/install.sh)
+[ -n "${MIX_DEB:-}" ] && mounts+=(-v "$(realpath "$MIX_DEB"):/mix/$(basename "$MIX_DEB"):ro")
 if [ -n "$DEB" ]; then
   DEB=$(realpath "$DEB"); mounts+=(-v "$DEB:/pkg/$(basename "$DEB"):ro"); expect=OPEN
 else
   expect=CLOSED
 fi
 # --shm-size: each participant maps its own segments; the default 64 MiB is too small.
-out=$(docker run --rm --shm-size=1g -e DISTRO="$DISTRO" -e WAIT_S="$WAIT_S" "${mounts[@]}" \
+out=$(docker run --rm --shm-size=1g -e DISTRO="$DISTRO" -e PKG="$PKG" -e PIN="${PIN:-}" -e WAIT_S="$WAIT_S" "${mounts[@]}" \
   "ros:$DISTRO-ros-base@$DIGEST" bash /repro/inner.sh 2>&1) || { echo "$out"; exit 2; }
 echo "$out"
 verdict=$(echo "$out" | sed -n 's/^VERDICT: \([A-Z]*\).*/\1/p')

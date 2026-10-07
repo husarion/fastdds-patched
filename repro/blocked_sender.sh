@@ -44,8 +44,10 @@ DEB=${2:-}
 CASES=${CASES:-6}
 LEVER=${LEVER:-processing}
 DISTROS_ENV=${DISTROS_ENV:-$ROOT/distros.env}
-read -r _ _ DIGEST < <(grep -E "^$DISTRO " "$DISTROS_ENV") || { echo "unknown distro $DISTRO" >&2; exit 2; }
+read -r _ PKG DIGEST PIN < <(grep -E "^$DISTRO " "$DISTROS_ENV") || { echo "unknown distro $DISTRO" >&2; exit 2; }
 mounts=(-v "$HERE:/repro:ro")
+# MIX_DEB: a second package for the uid-10001 participants (repro/install.sh)
+[ -n "${MIX_DEB:-}" ] && mounts+=(-v "$(realpath "$MIX_DEB"):/mix/$(basename "$MIX_DEB"):ro")
 expect=WEDGED
 if [ -n "$DEB" ]; then
   DEB=$(realpath "$DEB"); mounts+=(-v "$DEB:/pkg/$(basename "$DEB"):ro")
@@ -56,7 +58,7 @@ fi
 [ "$LEVER" = processing ] || expect=RECOVERED
 expect=${EXPECT:-$expect}
 # SYS_PTRACE: wedge.py reads the senders' mappings, unlinked ports included, through /proc/<pid>/mem.
-out=$(docker run --rm --shm-size=2g --cap-add SYS_PTRACE -e DISTRO="$DISTRO" -e CASES="$CASES" -e LEVER="$LEVER" \
+out=$(docker run --rm --shm-size=2g --cap-add SYS_PTRACE -e DISTRO="$DISTRO" -e PKG="$PKG" -e PIN="${PIN:-}" -e CASES="$CASES" -e LEVER="$LEVER" \
   "${mounts[@]}" "ros:$DISTRO-ros-base@$DIGEST" bash /repro/blocked_inner.sh 2>&1) || { echo "$out"; exit 2; }
 echo "$out"
 verdict=$(echo "$out" | sed -n 's/^VERDICT: \([A-Z]*\).*/\1/p')

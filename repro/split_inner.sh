@@ -3,12 +3,7 @@
 # setup script reads unset variables.
 set -o pipefail
 export DEBIAN_FRONTEND=noninteractive
-if ls /pkg/*.deb >/dev/null 2>&1; then
-  dpkg -i /pkg/*.deb >/dev/null || { echo "dpkg -i failed"; exit 1; }
-  echo "installed: $(dpkg-query -W -f='${Package} ${Version}' "$(dpkg-deb -f /pkg/*.deb Package)")"
-else
-  echo "stock: $(dpkg-query -W -f='${Package} ${Version}\n' "ros-$DISTRO-fastrtps" "ros-$DISTRO-fastdds" 2>/dev/null)"
-fi
+. /repro/install.sh || exit 1
 source "/opt/ros/$DISTRO/setup.bash"
 export ROS_DOMAIN_ID=77 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export FASTRTPS_DEFAULT_PROFILES_FILE=/repro/shm_only.xml FASTDDS_DEFAULT_PROFILES_FILE=/repro/shm_only.xml
@@ -40,6 +35,8 @@ PY
 # Robot worlds mix users (UGV OS: the driver as root, the airlock half as uid 10001
 # with DAC_OVERRIDE): two publishers and one newcomer run as such a user.
 AS=(setpriv --reuid=10001 --regid=10001 --clear-groups --inh-caps=+dac_override,+dac_read_search --ambient-caps=+dac_override,+dac_read_search)
+# MIX_LD (install.sh): the uid-10001 participants load the second Fast DDS build
+[ -n "$MIX_LD" ] && AS+=(env "LD_LIBRARY_PATH=$MIX_LD:$LD_LIBRARY_PATH")
 newcomer() { timeout -s INT -k 5 30 "$@" ros2 topic list --no-daemon --spin-time 3 2>/dev/null | grep -c '^/w'; }
 split=0; broken=0; ran=0
 for r in $(seq 1 "$CASES"); do
@@ -52,6 +49,7 @@ for r in $(seq 1 "$CASES"); do
     "${as[@]}" ros2 topic pub -r 5 "/w$i" std_msgs/msg/String "{data: w$i}" >/dev/null 2>&1 & PIDS+=($!); sleep 0.3
   done
   sleep 6
+  libs=""; [ -n "$MIX_LD" ] && libs=" fastdds [$(mix_libs "${PIDS[@]}")]"
   python3 /repro/plant.py sem "$DPORT" >/dev/null 2>&1  # dies holding the port's named mutex
   kill -9 "${PIDS[0]}"                                  # the survivors regenerate the port at once
   sleep 27
@@ -60,8 +58,12 @@ for r in $(seq 1 "$CASES"); do
   if [ -n "$s" ]; then split=$((split + 1)); v=SPLIT; else v=whole; fi
   # A newcomer must see every publisher whatever its user: below 10 on both
   # reads, or a uid-10001 newcomer below 10, is a broken world even without a split.
-  if [ -z "$s" ] && { [ "$n1" -lt 10 ] && [ "$n2" -lt 10 ] || [ "$u1" -lt 10 ]; }; then broken=$((broken + 1)); v=BROKEN; fi
-  echo "round $r: $v stranded=[$s] newcomer sees $n1 and $n2 of 10 publishers, as uid 10001 $u1"
+  if [ -z "$s" ] && { [ "$n1" -lt 10 ] && [ "$n2" -lt 10 ] || [ "$u1" -lt 10 ]; }; then
+    broken=$((broken + 1)); v=BROKEN
+    alive=0; for p in "${PIDS[@]:1}"; do kill -0 "$p" 2>/dev/null && alive=$((alive + 1)); done
+    v="BROKEN (alive $alive of $((${#PIDS[@]} - 1)), port files $(ls /dev/shm | grep -c "_port$DPORT\$"))"
+  fi
+  echo "round $r: $v stranded=[$s] newcomer sees $n1 and $n2 of 10 publishers, as uid 10001 $u1$libs"
   kill -9 "${PIDS[@]}" 2>/dev/null; wait 2>/dev/null; sleep 1
   # UNTIL_SPLIT=1 (the stock run): one split proves the bug, stop there.
   [ "${UNTIL_SPLIT:-0}" = 1 ] && [ "$split" -gt 0 ] && break

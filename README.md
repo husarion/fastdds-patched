@@ -1,6 +1,6 @@
 # fastdds-patched
 
-Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with three shared-memory transport fixes that upstream does not have yet. Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds).
+Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with three shared-memory transport fixes that upstream does not have yet. Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11).
 
 All three bugs hit a host whose ROS processes share one shared-memory world and one of them dies uncleanly (SIGKILL, OOM, a crash). Each fix is inside a private header: the library's ABI and the shared-memory layout do not change, so patched and unpatched processes can share a world (each fix protects the processes that carry it).
 
@@ -42,7 +42,7 @@ A participant killed between taking a message and finishing it leaves exactly su
                          return true;
 ```
 
-Present in 2.6.12, 2.14.6, 3.6.2 and master as of 2026-10-04.
+Present in 2.6.12, 2.14.6, 2.14.7, 3.6.2 and master as of 2026-10-04.
 
 ## Evidence
 
@@ -93,6 +93,27 @@ The UGV OS release candidate of 2026-10-04 (every robot-world process on v1) spl
 
 Without the flip, the world's own timing in the container strands no round on any package (stock 0 of 16, v1 0 of 16, `+husarion4` 0 of 158, 64 of them with `docker update --cpuset-cpus` bursts during the restart; with the processing mark alone 0 of 12 each); the lever stands in for the robot's timing, which caught the same path in 4 of 11 rounds without 0003. An earlier version of the model let the `ros2` daemon, which the CLI participants spawn, survive into the next round's world after its files were deleted; that version stranded idle participants on every package (4 of 100 rounds, none since in 226), so the model now kills the daemon every round and those rounds are no reading of the packages.
 
+## v3: Jazzy on Fast DDS 2.14.7
+
+The ROS repository synced Fast DDS 2.14.7 for Jazzy on 2026-09-11, after the newest `ros:jazzy-ros-base` image was built, so an image that runs `apt-get upgrade` installs 2.14.7 and can no longer take the v2 package (apt refuses the downgrade). v3 rebuilds the same three patches on 2.14.7, as `+husarion5`. Humble (2.6.12) and Lyrical (3.6.2) did not move in the repository and are rebuilt from the same sources and patches as v2.
+
+What 2.14.7 changes, against the v2.14.6 tag: 80 source files, mostly security (the security manager, PKI-DH, the AES-GCM crypto plugin, permissions parsing), the TCP transport and its RTCP messages, a new `BaseReader.cpp`, participant and endpoint discovery, a length underflow guard in `MessageReceiver`, an IPv4 address length check, the data-sharing listener and reader pool, and Fast CDR 2.2.8. None of it touches the shared-memory transport: `src/cpp/rtps/transport/shared_mem/` and `src/cpp/utils/shared_memory/` are byte-identical between the two tags, and the ROS source package `ros-jazzy-fastrtps 2.14.7-1noble` carries them unchanged (no Debian patches). The only shared-memory-adjacent change is in the bundled Boost: `rbtree_best_fit::check_sanity()`, which `SharedMemGlobal` calls when it opens an existing port, now also rejects a free block of size zero and checks the free total as it goes. A healthy segment passes both versions; only an already corrupt one can read differently. So upstream fixed none of the three bugs, and `patches/2.14.7/` are the 2.14.6 patches byte for byte. They apply without fuzz.
+
+The same identity answers whether a v3 process and a v2 one can share a robot world (some images still on 2.14.6 `+husarion4`, others built later on 2.14.7 `+husarion5`). The segment and port layout (`CURRENT_ABI_VERSION`, `PortNode`, the listener table), the segment, port and lock file names (`_el`, `_sl`, `sem.*_mutex`) and the flock holder file of fix 2 (`<domain>_port<N>_mutex_holder`, its lock order and its 2 s timeout) are all the same source in both. `repro/install.sh` can mix two builds in one world (`MIX_DEB`: the uid-10001 participants load the second package, together with the repository's rmw_fastrtps and typesupport rebuilt against it, and every round prints which library each participant mapped).
+
+| Architecture | Package | closed_world.sh | split_world.sh | blocked_sender.sh |
+|---|---|---|---|---|
+| amd64 | stock 2.14.7 | CLOSED 134 s after the load | SPLIT at round 1 | WEDGED 6 of 6 |
+| amd64 | 2.14.7 `+husarion5` | OPEN after 600 s | WHOLE 0 of 8 | RECOVERED 0 of 6 |
+| arm64 | stock 2.14.7 | CLOSED 134 s after the load (2 of 3 runs, see below) | SPLIT at round 1 | WEDGED 6 of 6 |
+| arm64 | 2.14.7 `+husarion5` | OPEN after 600 s | WHOLE 0 of 8 | RECOVERED 0 of 6 |
+
+Mixed world, Jazzy amd64, 2026-10-06, root participants on 2.14.6 `+husarion4` and the uid-10001 participants (the airlock halves' role) on 2.14.7 `+husarion5`: `split_world.sh` WHOLE 0 of 24, with 16 participants on the v2 library and 2 on the v3 one in every round, and `restart_world.sh` with `LEVER=forced` WHOLE 0 of 8, with the restarted half and its side participant on v3. In the same sitting, v2 alone read WHOLE 0 of 24 and v3 alone 1 BROKEN of 24: every participant alive, one port file, no split, and the single uid-10001 newcomer saw 8 of 10 publishers. A root newcomer read as low as 6 of 10 in rounds of both controls that stayed whole, because a round turns BROKEN only when both root reads are short but on a single short uid-10001 read. This is the newcomer's 30 s listing missing publishers, the same as v2's single 9 of 10 read above, and it says nothing about the package. A first mixed model that loaded the 2.14.7 library under the base image's rmw_fastrtps (built against 2.14.6, a pairing no image has) read BROKEN 2 of 40. One of those rounds had all three newcomers at 0 of 10 and ran before the round recorded which processes were alive. It did not recur in the faithful model, so it is no reading of the packages, but it remains unexplained.
+
+Verdict: a robot world whose processes run v2 (2.14.6 `+husarion4`) and v3 (2.14.7 `+husarion5`) side by side carries all three fixes in every process. The two share the same shared-memory code and lock protocol, and the mixed runs read as whole as either package alone.
+
+On arm64 (the 10-core VM), the first stock run of `closed_world.sh` read OPEN: the second death went unnoticed as it should, but the discovery ring did not fill within 600 s. Two runs after it closed at 134 s (2.14.7, and 2.14.6 as a control). The release workflow's arm64 job can therefore turn red on that step now and then without saying anything about the fix. Humble and Lyrical built on arm64 with this tooling (`+husarion5`): Humble split stock at round 1 and stayed whole patched 0 of 8, and Lyrical's stock world closed at 135 s.
+
 ## Every process needs it
 
 A single unpatched process in the shared-memory world keeps writing into its stale slot (fix 1), resets a dead owner's port mutex without the file lock (fix 2) or can spin in the recovery loop (fix 3), so the world stays exposed. Install the package in every image whose processes share the robot's `/dev/shm` world: the driver, rosbridge, cameras, the airlock halves and anything else, including the `ros2` CLI that runs inside those containers.
@@ -106,7 +127,7 @@ Each release `v<N>` carries one package per distro and architecture under a stab
 # processes share the robot's /dev/shm ROS world needs it. The last three
 # checks prove it at build time: the patched package is installed, its files
 # are intact, and no other copy of the library exists for a process to load.
-ARG FASTDDS_PATCHED=v2
+ARG FASTDDS_PATCHED=v3
 ARG FASTDDS_SHA256_AMD64=<sha256 of fastrtps-jazzy-amd64.deb from SHA256SUMS>
 ARG FASTDDS_SHA256_ARM64=<sha256 of fastrtps-jazzy-arm64.deb from SHA256SUMS>
 RUN set -eu; arch=$(dpkg --print-architecture); \
@@ -129,7 +150,7 @@ For a private repository, the download needs a read token passed as a BuildKit s
 ## Building and testing locally
 
 ```bash
-./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion4_<arch>.deb
+./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion5_<arch>.deb
 repro/closed_world.sh jazzy                        # stock: the world must close (exit 0)
 repro/closed_world.sh jazzy out/jazzy/*.deb        # patched: it must stay open (exit 0)
 repro/split_world.sh jazzy                         # stock: the world must split within 48 rounds (exit 0)
@@ -142,8 +163,8 @@ LEVER=forced CASES=4 repro/restart_world.sh jazzy out/jazzy/*.deb  # patched: th
 
 Each reproducer reads the expected verdict from the package changelog (the subject of every patch is written into it), so a package with an older patch set is expected to fail the newer reproducers. `blocked_sender.sh` installs gdb in its container (network for apt) and needs `SYS_PTRACE`; `locks.py`, `plant.py` and `wedge.py` read and plant the port state the reproducers use and work on a live host too.
 
-`distros.env` pins each release's base image by digest, which fixes the package version that gets patched. When the ROS repository syncs a new Fast DDS version, bump the digest and add `patches/<new version>/` in the same commit. The release workflow builds on amd64 and arm64 and publishes only when, on both, the stock package fails all three reproducers and the patched one passes them.
+`distros.env` pins each release's base image by digest and, optionally, the stock source package version to patch (such as `2.14.7-1noble`; the binary adds a build stamp that differs per architecture). Without a version, the build patches the version the base image carries. The ROS repository can ship a newer Fast DDS before any base image carries it (Jazzy's 2.14.7 arrived after the newest `ros:jazzy-ros-base` was built), so a version field makes the build and the reproducers install that version from the repository first. The repository keeps only its newest version, so a pinned version stops building once it moves on. When the ROS repository syncs a new Fast DDS version, set the version field (or bump the digest to a base image that carries it) and add `patches/<new version>/` in the same commit. The release workflow builds on amd64 and arm64 and publishes only when, on both, the stock package fails all three reproducers and the patched one passes them.
 
 ## When to drop this
 
-When upstream ships the fix and it reaches the ROS apt repository for a distro, stop installing the package for that distro and remove its row from `distros.env`. The upstream reports: not filed yet (drafts for fix 1 in `upstream/`).
+When upstream ships the fix and it reaches the ROS apt repository for a distro, stop installing the package for that distro and remove its row from `distros.env`. The upstream reports: not filed yet (drafts in `upstream/`). Fast DDS 2.14.7 does not fix any of the three.

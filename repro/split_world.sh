@@ -33,8 +33,10 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 DISTRO=${1:?usage: split_world.sh <distro> [deb]}
 DEB=${2:-}
-read -r _ _ DIGEST < <(grep -E "^$DISTRO " "$ROOT/distros.env") || { echo "unknown distro $DISTRO" >&2; exit 2; }
+read -r _ PKG DIGEST PIN < <(grep -E "^$DISTRO " "$ROOT/distros.env") || { echo "unknown distro $DISTRO" >&2; exit 2; }
 mounts=(-v "$HERE:/repro:ro")
+# MIX_DEB: a second package for the uid-10001 participants (repro/install.sh)
+[ -n "${MIX_DEB:-}" ] && mounts+=(-v "$(realpath "$MIX_DEB"):/mix/$(basename "$MIX_DEB"):ro")
 expect=SPLIT
 if [ -n "$DEB" ]; then
   DEB=$(realpath "$DEB"); mounts+=(-v "$DEB:/pkg/$(basename "$DEB"):ro")
@@ -47,7 +49,10 @@ fi
 expect=${EXPECT:-$expect}
 until_split=0; [ "$expect" = SPLIT ] && until_split=1
 if [ "$until_split" = 1 ]; then CASES=${CASES:-48}; else CASES=${CASES:-8}; fi
-out=$(docker run --rm --cpus 1 --shm-size=2g --cap-add DAC_READ_SEARCH -e DISTRO="$DISTRO" -e CASES="$CASES" -e UNTIL_SPLIT="$until_split" "${mounts[@]}" \
+# SYS_PTRACE with MIX_DEB: the round reads which library each participant mapped,
+# and a uid-10001 process's /proc/<pid>/maps needs it.
+caps=(--cap-add DAC_READ_SEARCH); [ -n "${MIX_DEB:-}" ] && caps+=(--cap-add SYS_PTRACE)
+out=$(docker run --rm --cpus 1 --shm-size=2g "${caps[@]}" -e DISTRO="$DISTRO" -e PKG="$PKG" -e PIN="${PIN:-}" -e CASES="$CASES" -e UNTIL_SPLIT="$until_split" "${mounts[@]}" \
   "ros:$DISTRO-ros-base@$DIGEST" bash /repro/split_inner.sh 2>&1) || { echo "$out"; exit 2; }
 echo "$out"
 verdict=$(echo "$out" | sed -n 's/^VERDICT: \([A-Z]*\).*/\1/p')

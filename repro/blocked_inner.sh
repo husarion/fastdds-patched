@@ -8,12 +8,7 @@
 #   none        a plain SIGKILL of the subscriber (control)
 set -o pipefail
 export DEBIAN_FRONTEND=noninteractive
-if ls /pkg/*.deb >/dev/null 2>&1; then
-  dpkg -i /pkg/*.deb >/dev/null || { echo "dpkg -i failed"; exit 1; }
-  echo "installed: $(dpkg-query -W -f='${Package} ${Version}' "$(dpkg-deb -f /pkg/*.deb Package)")"
-else
-  echo "stock: $(dpkg-query -W -f='${Package} ${Version}\n' "ros-$DISTRO-fastrtps" "ros-$DISTRO-fastdds" 2>/dev/null)"
-fi
+. /repro/install.sh || exit 1
 if [ "$LEVER" != none ]; then
   { apt-get update -qq && apt-get install -y -qq --no-install-recommends gdb; } >/dev/null 2>&1 || { echo "gdb install failed"; exit 1; }
 fi

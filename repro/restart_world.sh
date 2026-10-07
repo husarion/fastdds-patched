@@ -46,8 +46,10 @@ CHURN=${CHURN:-1}
 CPUS=${CPUS:-1.5}
 REPIN=${REPIN:-0}
 DISTROS_ENV=${DISTROS_ENV:-$ROOT/distros.env}
-read -r _ _ DIGEST < <(grep -E "^$DISTRO " "$DISTROS_ENV") || { echo "unknown distro $DISTRO" >&2; exit 2; }
+read -r _ PKG DIGEST PIN < <(grep -E "^$DISTRO " "$DISTROS_ENV") || { echo "unknown distro $DISTRO" >&2; exit 2; }
 mounts=(-v "$HERE:/repro:ro")
+# MIX_DEB: a second package for the uid-10001 participants (repro/install.sh)
+[ -n "${MIX_DEB:-}" ] && mounts+=(-v "$(realpath "$MIX_DEB"):/mix/$(basename "$MIX_DEB"):ro")
 expect=STRANDED
 if [ -n "$DEB" ]; then
   DEB=$(realpath "$DEB"); mounts+=(-v "$DEB:/pkg/$(basename "$DEB"):ro")
@@ -60,10 +62,11 @@ fi
 [ "$LEVER" = forced ] && EXPECT=${EXPECT:-$expect}
 name=restart-world-$$
 tmp=$(mktemp -d); trap 'docker rm -f "$name" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
-envs=(-e DISTRO="$DISTRO" -e CASES="$CASES" -e LEVER="$LEVER" -e CHURN="$CHURN" -e UNTIL_HIT="${UNTIL_HIT:-0}" -e GDB="${GDB:-0}")
+envs=(-e DISTRO="$DISTRO" -e PKG="$PKG" -e PIN="${PIN:-}" -e CASES="$CASES" -e LEVER="$LEVER" -e CHURN="$CHURN" -e UNTIL_HIT="${UNTIL_HIT:-0}" -e GDB="${GDB:-0}")
 if [ "$REPIN" = 1 ]; then mounts+=(-v "$tmp:/signal"); envs+=(-e REPIN_FILE=/signal/repin); fi
 # SYS_PTRACE: wedge.py reads the senders' mappings, unlinked ports included, through /proc/<pid>/mem.
-net=(--network none); { [ "$LEVER" = forced ] || [ "${GDB:-0}" = 1 ]; } && net=()  # gdb comes from apt
+# gdb and a pinned stock version (distros.env) come from apt
+net=(--network none); { [ "$LEVER" = forced ] || [ "${GDB:-0}" = 1 ] || { [ -n "${PIN:-}" ] && [ -z "$DEB" ]; }; } && net=()
 docker run -d --name "$name" "${net[@]}" --cpus "$CPUS" --shm-size=2g --cap-add SYS_PTRACE --cap-add DAC_READ_SEARCH "${envs[@]}" \
   "${mounts[@]}" "ros:$DISTRO-ros-base@$DIGEST" bash /repro/restart_inner.sh >/dev/null
 if [ "$REPIN" = 1 ]; then

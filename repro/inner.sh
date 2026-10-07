@@ -3,12 +3,7 @@
 # setup script reads unset variables.
 set -o pipefail
 export DEBIAN_FRONTEND=noninteractive
-if ls /pkg/*.deb >/dev/null 2>&1; then
-  dpkg -i /pkg/*.deb >/dev/null || { echo "dpkg -i failed"; exit 1; }
-  echo "installed: $(dpkg-query -W -f='${Package} ${Version}' "$(dpkg-deb -f /pkg/*.deb Package)")"
-else
-  echo "stock: $(dpkg-query -W -f='${Package} ${Version}\n' "ros-$DISTRO-fastrtps" "ros-$DISTRO-fastdds" 2>/dev/null)"
-fi
+. /repro/install.sh || exit 1
 source "/opt/ros/$DISTRO/setup.bash"
 export ROS_DOMAIN_ID=77 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export FASTRTPS_DEFAULT_PROFILES_FILE=/repro/shm_only.xml FASTDDS_DEFAULT_PROFILES_FILE=/repro/shm_only.xml

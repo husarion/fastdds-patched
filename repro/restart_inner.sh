@@ -19,12 +19,7 @@
 # in-send flip (below), so every round takes the path 0003 fixes.
 set -o pipefail
 export DEBIAN_FRONTEND=noninteractive
-if ls /pkg/*.deb >/dev/null 2>&1; then
-  dpkg -i /pkg/*.deb >/dev/null || { echo "dpkg -i failed"; exit 1; }
-  echo "installed: $(dpkg-query -W -f='${Package} ${Version}' "$(dpkg-deb -f /pkg/*.deb Package)")"
-else
-  echo "stock: $(dpkg-query -W -f='${Package} ${Version}\n' "ros-$DISTRO-fastrtps" "ros-$DISTRO-fastdds" 2>/dev/null)"
-fi
+. /repro/install.sh || exit 1
 source "/opt/ros/$DISTRO/setup.bash"
 export ROS_DOMAIN_ID=77 RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export FASTRTPS_DEFAULT_PROFILES_FILE=/repro/shm_only.xml FASTDDS_DEFAULT_PROFILES_FILE=/repro/shm_only.xml
@@ -32,6 +27,8 @@ DPORT=$((7400 + 250 * ROS_DOMAIN_ID))
 NS=3
 CC=/opt/ros/$DISTRO/lib/rclcpp_components/component_container
 AS=(setpriv --reuid=10001 --regid=10001 --clear-groups --inh-caps=+dac_override,+dac_read_search --ambient-caps=+dac_override,+dac_read_search)
+# MIX_LD (install.sh): the uid-10001 participants load the second Fast DDS build
+[ -n "$MIX_LD" ] && AS+=(env "LD_LIBRARY_PATH=$MIX_LD:$LD_LIBRARY_PATH")
 own_ports() { ls -l "/proc/$1/fd" 2>/dev/null | sed -n 's/.*fast\(rtps\|dds\)_port\([0-9]*\)_el$/\2/p' | sort -u | tr '\n' ' '; }
 counts() { cat "$1" 2>/dev/null || echo "-"; }
 # pids that map a segment of the discovery port but not the port file itself
@@ -133,6 +130,7 @@ for r in $(seq 1 "$CASES"); do
   "${AS[@]}" python3 /repro/counter.py /tmp/probe $NS >/dev/null 2>&1 & PROBE=$!
   CH=""; [ "${CHURN:-1}" = 1 ] && { churn & CH=$!; }
   sleep 12
+  libs=""; [ -n "$MIX_LD" ] && libs=" fastdds [$(mix_libs "${PIDS[@]}" "${SEND[@]}" "$V" "$HALF" "$PROBE")]"
   before=$(counts /tmp/c1); probe_counts=$(counts /tmp/probe)
   ports=$(own_ports "$PROBE")
   if [ -z "$ports" ] || [ "$probe_counts" = "-" ] || echo "$probe_counts" | grep -qw 0; then
@@ -183,7 +181,7 @@ for r in $(seq 1 "$CASES"); do
     fi
   fi
   [ "$flip" = "no flip" ] && v="$v(no flip caught)"
-  echo "round $r: $v ${flip:+($flip) }stranded=[$persist] ($names) orphaned_el=[$persist_o] regenerations=$regen counts before [$before] newcomer [$after] self-held [$wedge]"
+  echo "round $r: $v ${flip:+($flip) }stranded=[$persist] ($names) orphaned_el=[$persist_o] regenerations=$regen counts before [$before] newcomer [$after] self-held [$wedge]$libs"
   [ -n "$CH" ] && kill "$CH" 2>/dev/null
   kill -9 "${PIDS[@]}" "${SEND[@]}" "$V" "$V2" "$HALF" 2>/dev/null; pkill -9 -f "topic echo" 2>/dev/null; pkill -9 -f ros2cli.daemon 2>/dev/null; wait 2>/dev/null; sleep 1
   [ "${UNTIL_HIT:-0}" = 1 ] && [ "$stranded_n" -gt 0 ] && break
