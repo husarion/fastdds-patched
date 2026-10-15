@@ -1,8 +1,8 @@
 # fastdds-patched
 
-Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with three shared-memory transport fixes that upstream does not have yet. Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11).
+Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with four shared-memory transport fixes that upstream does not have yet (the fourth only on Jazzy's Fast DDS 2.14.7, the only version that has that bug). Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11), `+husarion6` in v4 (fixes 1 to 3 everywhere, fix 4 on Jazzy).
 
-All three bugs hit a host whose ROS processes share one shared-memory world and one of them dies uncleanly (SIGKILL, OOM, a crash). Each fix is inside a private header: the library's ABI and the shared-memory layout do not change, so patched and unpatched processes can share a world (each fix protects the processes that carry it).
+The first three bugs hit a host whose ROS processes share one shared-memory world and one of them dies uncleanly (SIGKILL, OOM, a crash). The fourth needs no death: it cuts large messages short whenever a profile allows shared-memory messages above 64 KiB. Each fix is inside a private header: the library's ABI and the shared-memory layout do not change, so patched and unpatched processes can share a world (each fix protects the processes that carry it).
 
 ## 1. A regenerated listener keeps its old slot (the closed world, v1)
 
@@ -43,6 +43,16 @@ A participant killed between taking a message and finishing it leaves exactly su
 ```
 
 Present in 2.6.12, 2.14.6, 2.14.7, 3.6.2 and master as of 2026-10-04.
+
+## 4. Large messages lose their last 60 bytes (the cut sample, v4, Jazzy only)
+
+Fast DDS 2.14.x stamps network statistics into a 60-byte submessage (id 0x80) that `RTPSMessageGroup` appends to every RTPS message shorter than 65 511 bytes (a guard backported from eProsima/Fast-DDS#5742: an unfragmented DATA above 64 KiB must stay the last submessage). The shared-memory transport strips that submessage again before it copies the message into the segment, and `get_statistics_message_pos()` decides that the message carries one from a single byte: `send_buffer[size - 60] == 0x80`. A message of 65 511 bytes or more never carries the submessage, so that byte is payload, and when it is 0x80 the transport sends the message 60 bytes short.
+
+Only a profile whose `maxMessageSize` is above 65 535 produces such messages; the UGV OS robot profile has 524 288. An unfragmented sample between about 64 KiB and `maxMessageSize` arrives 60 bytes short about once in 256 random samples (a DATA that large carries length 0, so the reader accepts the short payload, and reliable QoS never repairs it). A fragmented sample exposes every DATA_FRAG message: best effort loses about 6 % of 1 MiB random samples, reliable repairs random data, and a payload whose byte stays 0x80 there (a constant fill, such as an image of one colour) never arrives at all. Fast DDS 2.14.6 and 2.14.7 have it, and so does the 2.14.x branch as of 2026-10-15. 2.6.12 (Humble) has no guard and always appends the submessage, and 3.6.2 (Lyrical) strips it by buffer identity, so neither is affected and `patches/2.6.12/` and `patches/3.6.2/` carry no 0004.
+
+`0004` makes `get_statistics_message_pos()` walk the submessage chain from the RTPS header, the way the receiver reads it, and accept the position only when a submessage starts exactly at `size - 60` with the 0x80 id and the 56-byte statistics length. A length test alone cannot decide it (with the submessage a message is 80 to 65 570 bytes long, without it 65 511 or more), a flag from the group to the transport would change the public transport interface and the ABI, and 3.x's buffer identity needs a send API that 2.14 does not have. The same function serves the UDP and TCP statistics stamping, which would write 56 bytes into the payload of such a message on a TCP transport with a large `maxMessageSize` (read from the code, not reproduced); the fix covers that path too. Every message that carries the submessage is stripped exactly as before.
+
+The bug is in the sender: a stock publisher cuts its own messages, whatever its subscribers run.
 
 ## Evidence
 
@@ -114,9 +124,27 @@ Verdict: a robot world whose processes run v2 (2.14.6 `+husarion4`) and v3 (2.14
 
 On arm64 (the 10-core VM), the first stock run of `closed_world.sh` read OPEN: the second death went unnoticed as it should, but the discovery ring did not fill within 600 s. Two runs after it closed at 134 s (2.14.7, and 2.14.6 as a control). The release workflow's arm64 job can therefore turn red on that step now and then without saying anything about the fix. Humble and Lyrical built on arm64 with this tooling (`+husarion5`): Humble split stock at round 1 and stayed whole patched 0 of 8, and Lyrical's stock world closed at 135 s.
 
+## v4: large messages on Jazzy
+
+`repro/large_message.sh` (fix 4) runs an rclpy publisher and a raw rclpy subscriber of `sensor_msgs/msg/Image` under `repro/robot_shm_only.xml`, a byte-identical copy of the robot profile UGV OS ships (sha256 `b90b78e74075ddf2194996ea85247076bade4d62f2502b966208380fb3269555`, from ros2_airlock's `testbed/rig/quadlets/fastdds_shm_only.xml`; it differs from that repository's `profiles/robot_world/fastdds_shm_only.xml` by one comment line). Eight cases of 20 samples each: 70 000 B and 1 MiB of 0x80, reliable and best effort; 70 000 B of zeros with 0x80 at `data[N - 60]` (the message's byte at `size - 60`), reliable and best effort; and the same byte one position earlier and later. A sample is whole when it has its exact serialized length and every field and data byte equal to what was sent. The verdict is TRUNCATED only when the `data[N - 60]` case is cut by exactly 60 bytes and both neighbours arrive whole, which shows that the one byte causes the cut and the size does not. It is WHOLE when all eight cases are whole. `repro/strip_check.cpp` calls the stripping function directly on hand-built messages: it shows that a message that does carry the statistics submessage still loses exactly it, including messages of 65 536 and 65 552 bytes, where the length alone cannot tell.
+
+Jazzy amd64, 2026-10-15:
+
+| Package | large_message.sh | strip_check.cpp |
+|---|---|---|
+| stock 2.14.7 | TRUNCATED: 70 000 B of 0x80 every sample 60 short (both QoS), 1 MiB of 0x80 0 of 20 (both QoS), `data[N - 60]` every sample 60 short (both QoS), the neighbours whole | 7 of 13 cases FAIL |
+| 2.14.7 `+husarion5` (v3) | TRUNCATED, the same eight readings | (the stock header: 0001 to 0003 do not touch it) |
+| 2.14.7 `+husarion6` (v4) | WHOLE: 8 of 8 cases, 160 of 160 samples whole and byte-exact | 13 of 13 ok |
+| Humble stock 2.6.12 | WHOLE, 8 of 8 (not affected) | |
+| Lyrical stock 3.6.2 | WHOLE, 8 of 8 (not affected) | |
+
+The earlier reproducers on `+husarion6` (Jazzy amd64, same sitting): `closed_world.sh` OPEN after 600 s, `blocked_sender.sh` RECOVERED 0 of 6, `restart_world.sh` with `LEVER=forced` WHOLE 0 of 4. `split_world.sh` split no round, but read BROKEN in 2 of 24 rounds on `+husarion6` and 1 of 16 on `+husarion5` run beside it as a control (8-round runs: `+husarion6` 1, 0, 1; `+husarion5` 0, 1). Every participant was alive and there was one port file each time. In one `+husarion6` round, the single uid-10001 newcomer saw 7 of 10 publishers. In the other `+husarion6` round and the `+husarion5` one, all three newcomers saw 0 of 10. 0004 touches nothing on that path, and both packages read the same, so v4 does not regress it. The 0-of-10 round is the one the mixed-world model above left unexplained. It recurs on v3 alone and on v4, so it is no artefact of mixing builds. It can turn the release workflow's strict 8-round patched step red without saying anything about the four fixes.
+
+Arm64 was not run for v4: the arm64 VM was busy with timing-sensitive work, and a package build there is not light load. The probe that found the bug cut samples the same way on that VM with the v3 package (2.14.7 `+husarion5`), and kept them whole on Humble and Lyrical. The release workflow's arm64 job runs `large_message.sh` on stock and patched before it publishes anything.
+
 ## Every process needs it
 
-A single unpatched process in the shared-memory world keeps writing into its stale slot (fix 1), resets a dead owner's port mutex without the file lock (fix 2) or can spin in the recovery loop (fix 3), so the world stays exposed. Install the package in every image whose processes share the robot's `/dev/shm` world: the driver, rosbridge, cameras, the airlock halves and anything else, including the `ros2` CLI that runs inside those containers.
+A single unpatched process in the shared-memory world keeps writing into its stale slot (fix 1), resets a dead owner's port mutex without the file lock (fix 2), can spin in the recovery loop (fix 3) or cuts its own large messages short (fix 4), so the world stays exposed. Install the package in every image whose processes share the robot's `/dev/shm` world: the driver, rosbridge, cameras, the airlock halves and anything else, including the `ros2` CLI that runs inside those containers.
 
 ## Using the packages
 
@@ -127,7 +155,7 @@ Each release `v<N>` carries one package per distro and architecture under a stab
 # processes share the robot's /dev/shm ROS world needs it. The last three
 # checks prove it at build time: the patched package is installed, its files
 # are intact, and no other copy of the library exists for a process to load.
-ARG FASTDDS_PATCHED=v3
+ARG FASTDDS_PATCHED=v4
 ARG FASTDDS_SHA256_AMD64=<sha256 of fastrtps-jazzy-amd64.deb from SHA256SUMS>
 ARG FASTDDS_SHA256_ARM64=<sha256 of fastrtps-jazzy-arm64.deb from SHA256SUMS>
 RUN set -eu; arch=$(dpkg --print-architecture); \
@@ -150,7 +178,7 @@ For a private repository, the download needs a read token passed as a BuildKit s
 ## Building and testing locally
 
 ```bash
-./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion5_<arch>.deb
+./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion6_<arch>.deb
 repro/closed_world.sh jazzy                        # stock: the world must close (exit 0)
 repro/closed_world.sh jazzy out/jazzy/*.deb        # patched: it must stay open (exit 0)
 repro/split_world.sh jazzy                         # stock: the world must split within 48 rounds (exit 0)
@@ -159,12 +187,14 @@ repro/blocked_sender.sh jazzy                      # stock: a sender must wedge 
 repro/blocked_sender.sh jazzy out/jazzy/*.deb      # patched: it must recover (exit 0)
 LEVER=forced CASES=4 repro/restart_world.sh jazzy                  # stock: the restart sequence strands a sender (exit 0)
 LEVER=forced CASES=4 repro/restart_world.sh jazzy out/jazzy/*.deb  # patched: the world stays whole (exit 0)
+repro/large_message.sh jazzy                       # stock: large samples are cut 60 bytes short (exit 0; Humble and Lyrical stock: whole)
+repro/large_message.sh jazzy out/jazzy/*.deb       # patched: every sample whole and byte-exact (exit 0)
 ```
 
 Each reproducer reads the expected verdict from the package changelog (the subject of every patch is written into it), so a package with an older patch set is expected to fail the newer reproducers. `blocked_sender.sh` installs gdb in its container (network for apt) and needs `SYS_PTRACE`; `locks.py`, `plant.py` and `wedge.py` read and plant the port state the reproducers use and work on a live host too.
 
-`distros.env` pins each release's base image by digest and, optionally, the stock source package version to patch (such as `2.14.7-1noble`; the binary adds a build stamp that differs per architecture). Without a version, the build patches the version the base image carries. The ROS repository can ship a newer Fast DDS before any base image carries it (Jazzy's 2.14.7 arrived after the newest `ros:jazzy-ros-base` was built), so a version field makes the build and the reproducers install that version from the repository first. The repository keeps only its newest version, so a pinned version stops building once it moves on. When the ROS repository syncs a new Fast DDS version, set the version field (or bump the digest to a base image that carries it) and add `patches/<new version>/` in the same commit. The release workflow builds on amd64 and arm64 and publishes only when, on both, the stock package fails all three reproducers and the patched one passes them.
+`distros.env` pins each release's base image by digest and, optionally, the stock source package version to patch (such as `2.14.7-1noble`; the binary adds a build stamp that differs per architecture). Without a version, the build patches the version the base image carries. The ROS repository can ship a newer Fast DDS before any base image carries it (Jazzy's 2.14.7 arrived after the newest `ros:jazzy-ros-base` was built), so a version field makes the build and the reproducers install that version from the repository first. The repository keeps only its newest version, so a pinned version stops building once it moves on. When the ROS repository syncs a new Fast DDS version, set the version field (or bump the digest to a base image that carries it) and add `patches/<new version>/` in the same commit. The release workflow builds on amd64 and arm64 and publishes only when, on both, the stock package fails the reproducers and the patched one passes them (`large_message.sh` expects the stock package to fail only on a version whose `patches/<version>/` carries 0004, and reads WHOLE on the others).
 
 ## When to drop this
 
-When upstream ships the fix and it reaches the ROS apt repository for a distro, stop installing the package for that distro and remove its row from `distros.env`. The upstream reports: not filed yet (drafts in `upstream/`). Fast DDS 2.14.7 does not fix any of the three.
+When upstream ships the fix and it reaches the ROS apt repository for a distro, stop installing the package for that distro and remove its row from `distros.env`. The upstream reports: not filed yet (drafts in `upstream/`). Fast DDS 2.14.7 does not fix any of the four.

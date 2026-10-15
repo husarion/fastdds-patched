@@ -1,0 +1,96 @@
+From: Husarion <support@husarion.com>
+Subject: [PATCH] SHM: the statistics strip finds the statistics submessage by the submessage chain
+
+RTPSMessageGroup::send() appends the 60-byte statistics submessage (id 0x80)
+only to RTPS messages shorter than 65511 bytes (65535 - RTPSMESSAGE_DATA_MIN_LENGTH:
+an unfragmented DATA above 64 KiB must stay the last submessage).
+SharedMemTransport::send() then calls remove_statistics_submessage(), and
+get_statistics_message_pos() decides that the message carries the submessage
+from one byte, send_buffer[size - 60] == 0x80. A message of 65511 bytes or more
+never carries one, and its byte at size - 60 is payload: when it happens to be
+0x80, the transport cuts the last 60 bytes of real data. Such messages exist only
+with a maxMessageSize above 65535 on the SHM transport (UDP datagrams stay below
+the threshold). An unfragmented sample between 64 KiB and maxMessageSize is
+delivered 60 bytes short about once in 256 random samples (a constant 0x80 fill:
+every sample), and nothing heals it. A fragmented sample exposes every DATA_FRAG
+message: best effort loses about 6 % of 1 MiB random samples, reliable heals
+by retransmission except when the byte stays 0x80 in every resend (a 0x80 fill
+never arrives). set_statistics_submessage_from_transport() (UDP and TCP, through
+OutputTrafficManager) uses the same test and writes a locator, a timestamp and
+counters at that position, so a TCP transport with a maxMessageSize above 65535
+would overwrite 56 payload bytes in place (reasoned from the code, not reproduced).
+Present in 2.14.6 and 2.14.7 and on the 2.14.x branch (2026-10-15), from the
+backport of the sender-side size guard (eProsima/Fast-DDS#5742).
+
+get_statistics_message_pos() now walks the submessage chain from the RTPS header
+the way MessageReceiver reads it (length in the endianness of the flags' E bit,
+padded to 4; a zero length on anything but INFO_TS and PAD is the last
+submessage, which extends to the end of the message), and returns the position
+only when a submessage starts exactly at size - 60 with the 0x80 id and the
+statistics submessage's 56-byte length. That is the definition of "the last
+submessage is the statistics submessage", so it holds for every message shape,
+including encrypted messages (the submessage is appended after encoding) and big
+DATA submessages (length 0, nothing follows them). The one-byte test stays as the
+fast path: a message whose byte is not 0x80 is never walked. Alternatives:
+- a length test cannot decide it: with the submessage a message is 80 to 65570
+  bytes long, without it 65511 or more, so 65511 to 65570 is ambiguous both ways;
+- carrying a flag from RTPSMessageGroup to the transport changes the public
+  TransportInterface::send() signature and the library's ABI;
+- 3.x strips by buffer identity (the submessage is its own NetworkBuffer and
+  remove_statistics_buffer() looks at buffers.back()), which needs the gather-send
+  transport API that 2.14 does not have.
+Private header only, no ABI or wire change: a patched process strips exactly what
+a stock one strips from every message that carries the submessage.
+
+---
+--- a/src/cpp/statistics/rtps/messages/RTPSStatisticsMessages.hpp
++++ b/src/cpp/statistics/rtps/messages/RTPSStatisticsMessages.hpp
+@@ -27,6 +27,7 @@
+ #include <fastdds/rtps/common/Types.h>
+ #include <fastdds/rtps/messages/CDRMessage.h>
+ #include <fastdds/rtps/messages/RTPSMessageCreator.h>
++#include <fastdds/rtps/messages/RTPS_messages.h>
+ 
+ #define FASTDDS_STATISTICS_NETWORK_SUBMESSAGE 0x80
+ 
+@@ -160,8 +161,38 @@
+         uint32_t pos = send_buffer_size - statistics_submessage_length;
+         if (FASTDDS_STATISTICS_NETWORK_SUBMESSAGE == send_buffer[pos])
+         {
+-            // only succeed if the message is properly formatted
+-            statistics_pos = pos;
++            // The byte alone proves nothing: RTPSMessageGroup appends the statistics submessage
++            // only to messages shorter than 65511 bytes, and in a longer one (a DATA above 64 KiB,
++            // a DATA_FRAG of a large maxMessageSize) this is a payload byte. Walk the submessage
++            // chain from the RTPS header as MessageReceiver reads it, and only succeed when a
++            // submessage starts exactly here with the statistics submessage's length.
++            using namespace eprosima::fastrtps::rtps;
++            uint32_t walk = RTPSMESSAGE_HEADER_SIZE;
++            while (walk < pos)
++            {
++                const octet id = send_buffer[walk];
++                const bool little_endian = (send_buffer[walk + 1] & 0x01) != 0;
++                const uint32_t length = little_endian ?
++                        (send_buffer[walk + 2] | (send_buffer[walk + 3] << 8)) :
++                        ((send_buffer[walk + 2] << 8) | send_buffer[walk + 3]);
++                if ((0 == length) && (INFO_TS != id) && (PAD != id))
++                {
++                    // This submessage extends to the end of the message: nothing follows it
++                    break;
++                }
++                walk += RTPSMESSAGE_SUBMESSAGEHEADER_SIZE + ((length + 3u) & ~3u);
++            }
++            if (walk == pos)
++            {
++                const bool little_endian = (send_buffer[pos + 1] & 0x01) != 0;
++                const uint32_t length = little_endian ?
++                        (send_buffer[pos + 2] | (send_buffer[pos + 3] << 8)) :
++                        ((send_buffer[pos + 2] << 8) | send_buffer[pos + 3]);
++                if (statistics_submessage_data_length == length)
++                {
++                    statistics_pos = pos;
++                }
++            }
+         }
+     }
+ 

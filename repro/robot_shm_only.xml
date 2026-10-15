@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ros2_airlock: canonical FIXED robot-world profile (Panther/Lynx built-in computer).
+  SPEC.md §4.1; research + validation battery: docs/robot-world-profile.md.
+
+  Every DDS process in the robot world (driver nodes, airlock robot-half, ros2 CLI,
+  ros2 daemon) MUST load this exact profile — an SHM-only participant is invisible
+  to default-configured (UDP-discovery) participants and vice versa.
+
+  Deployment invariants (enforced by the robot image, not by this file):
+    RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    FASTRTPS_DEFAULT_PROFILES_FILE=<path to this file>
+    ROS_AUTOMATIC_DISCOVERY_RANGE=SYSTEM_DEFAULT   # never LOCALHOST: rmw would re-add UDP
+    dedicated ROS_DOMAIN_ID=77 (fixed; distinct from the fleet world AND from
+                                 the ROS default 0 a customer container runs on)
+    all containers: ipc:host + network:host        # host identity hashes NICs; own netns = "different host" = silence
+    single UID for every robot-world process       # mixed UIDs break the shared SHM discovery port
+    boot-time sweep before any DDS process: fastdds shm clean; rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_*
+    apt-mark hold ros-jazzy-fastrtps ros-jazzy-rmw-fastrtps-*
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>robot_world_shm</transport_id>
+      <type>SHM</type>
+      <!-- 16 MiB: must exceed the largest sample; the 512 KiB default silently
+           degrades MiB-class messages (RELIABLE retry storms, BEST_EFFORT drops).
+           /dev/shm budget = segment_size x participant count. If a future sensor
+           exceeds this per sample, this value must grow WITH a new validation run. -->
+      <segment_size>16777216</segment_size>
+      <!-- maxMessageSize sizing rule (both failure modes measured live on the
+           P2 bench, PTH-0957/lynx-d6b2 2026-08-14/15 — do not "round up"):
+           - Fast DDS preallocates ~10 RTPS buffers of this size PER PROCESS.
+             At the old 16 MiB that was ~160 MiB/process (bare talker 222 vs
+             62 MiB) × ~13 robot-world processes = OOM-looped a 4 GB Pi.
+           - But LIVE samples above this value fragment over SHM and only
+             VOLATILE streaming survives that: a TRANSIENT_LOCAL late-joiner
+             receives NOTHING for a fragmented historical sample (measured:
+             the ~200 KiB /robot_description latch — controller_manager hangs
+             on "Waiting for data on 'robot_description'" forever, driverless
+             robot). 1 MiB volatile @10 Hz was fine at ~1.5%/core.
+           => set it to cover the LARGEST LATCHED (transient_local) sample
+           with margin — 512 KiB ≈ 5 MiB/process; sensor-class volatile data
+           may exceed it freely. The segment (above) must exceed the largest
+           sample of ANY kind. camelCase per XSD; snake_case silently
+           ignored. -->
+      <maxMessageSize>524288</maxMessageSize>
+      <port_queue_capacity>512</port_queue_capacity>
+      <healthy_check_timeout_ms>1000</healthy_check_timeout_ms>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="robot_world" is_default_profile="true">
+    <rtps>
+      <!-- No UDP/TCP transport is ever instantiated: user data AND discovery
+           (PDP/EDP) run over SHM. No socket exists; nothing to firewall. -->
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports>
+        <transport_id>robot_world_shm</transport_id>
+      </userTransports>
+      <builtin>
+        <discovery_config>
+          <!-- Redundant while no network transport exists; guarantees off-host
+               discovery data is dropped if a transport ever sneaks back in. -->
+          <ignoreParticipantFlags>FILTER_DIFFERENT_HOST</ignoreParticipantFlags>
+        </discovery_config>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
