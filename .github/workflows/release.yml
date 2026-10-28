@@ -1,7 +1,8 @@
 # A tag v<N> builds the patched Fast DDS packages for every release in
 # distros.env on amd64 and arm64 (native runners), proves on each architecture
 # that the stock package fails each reproducer (a closed world, a split world, a
-# wedged sender, and on Fast DDS 2.14.x large messages cut 60 bytes short) and
+# wedged sender, and on Fast DDS 2.14.x large messages cut 60 bytes short and a
+# world split by an address change despite FASTDDS_HOST_ID) and
 # the patched one passes them all, and only then publishes
 # one GitHub release carrying every .deb and a SHA256SUMS file. The split is a
 # race: a stock round splits about one time in three, so the stock run stops at
@@ -42,6 +43,10 @@ jobs:
         run: repro/large_message.sh ${{ matrix.distro }}
       - name: The patched package carries them whole and byte-exact
         run: repro/large_message.sh ${{ matrix.distro }} out/*.deb
+      - name: The stock package splits the world when the host's addresses change (FASTDDS_HOST_ID ignored)
+        run: repro/host_id.sh ${{ matrix.distro }}
+      - name: The patched package keeps it whole with FASTDDS_HOST_ID (Fast DDS 2.14.x; split on the others)
+        run: repro/host_id.sh ${{ matrix.distro }} out/*.deb
       - uses: actions/upload-artifact@v4
         with:
           name: deb-${{ matrix.distro }}-${{ matrix.runner }}

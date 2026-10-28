@@ -9,15 +9,18 @@
 # replaces: v1 was +husarion1 (0001), v2 +husarion4 (0001-0003; +husarion2 and
 # +husarion3 were unreleased test builds, and the +husarion2 one is broken, so
 # the name is never reused), v3 +husarion5 (0001-0003, Jazzy on 2.14.7), v4 is
-# +husarion6 (0001-0003 everywhere, 0004 on Jazzy's 2.14.7).
+# +husarion6 (0001-0003 everywhere, 0004 on Jazzy's 2.14.7), +husarion7 adds
+# 0005 on Jazzy's 2.14.7. PLATFORM (such as linux/arm64) builds for another
+# architecture through docker's emulation, for a local build of what the release
+# workflow builds on its native runners.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 DISTRO=${1:?usage: build.sh <distro> [outdir]}
 OUT=$(realpath -m "${2:-$HERE/out/$DISTRO}")
 read -r _ PKG DIGEST PIN < <(grep -E "^$DISTRO " "$HERE/distros.env") || { echo "unknown distro $DISTRO" >&2; exit 2; }
-SUFFIX=${SUFFIX:-+husarion6}
+SUFFIX=${SUFFIX:-+husarion7}
 mkdir -p "$OUT"
-docker run --rm -e DISTRO="$DISTRO" -e PKG="$PKG" -e SUFFIX="$SUFFIX" -e PIN="${PIN:-}" -e HOST_UID="$(id -u)" \
+docker run --rm ${PLATFORM:+--platform "$PLATFORM"} -e DISTRO="$DISTRO" -e PKG="$PKG" -e SUFFIX="$SUFFIX" -e PIN="${PIN:-}" -e HOST_UID="$(id -u)" \
   -v "$HERE/patches:/patches:ro" -v "$HERE/scripts:/scripts:ro" -v "$OUT:/out" \
   "ros:$DISTRO-ros-base@$DIGEST" bash /scripts/build-inner.sh
 ls -l "$OUT"

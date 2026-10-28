@@ -1,6 +1,6 @@
 # fastdds-patched
 
-Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with four shared-memory transport fixes that upstream does not have yet (the fourth only on Jazzy's Fast DDS 2.14.7, the only version that has that bug). Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11), `+husarion6` in v4 (fixes 1 to 3 everywhere, fix 4 on Jazzy).
+Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with four shared-memory transport fixes that upstream does not have yet (the fourth only on Jazzy's Fast DDS 2.14.7, the only version that has that bug), and on Jazzy a fifth change, an opt-in `FASTDDS_HOST_ID` environment variable that pins the host id shared-memory locators carry. Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11), `+husarion6` in v4 (fixes 1 to 3 everywhere, fix 4 on Jazzy), `+husarion7` in v5 (adds fix 5, the `FASTDDS_HOST_ID` override, on Jazzy).
 
 The first three bugs hit a host whose ROS processes share one shared-memory world and one of them dies uncleanly (SIGKILL, OOM, a crash). The fourth needs no death: it cuts large messages short whenever a profile allows shared-memory messages above 64 KiB. Each fix is inside a private header: the library's ABI and the shared-memory layout do not change, so patched and unpatched processes can share a world (each fix protects the processes that carry it).
 
@@ -53,6 +53,12 @@ Only a profile whose `maxMessageSize` is above 65 535 produces such messages; th
 `0004` makes `get_statistics_message_pos()` walk the submessage chain from the RTPS header, the way the receiver reads it, and accept the position only when a submessage starts exactly at `size - 60` with the 0x80 id and the 56-byte statistics length. A length test alone cannot decide it (with the submessage a message is 80 to 65 570 bytes long, without it 65 511 or more), a flag from the group to the transport would change the public transport interface and the ABI, and 3.x's buffer identity needs a send API that 2.14 does not have. The same function serves the UDP and TCP statistics stamping, which would write 56 bytes into the payload of such a message on a TCP transport with a large `maxMessageSize` (read from the code, not reproduced); the fix covers that path too. Every message that carries the submessage is stripped exactly as before.
 
 The bug is in the sender: a stock publisher cuts its own messages, whatever its subscribers run.
+
+## 5. The host id follows the IPv4 addresses a process saw at start (the address split, v5, Jazzy only)
+
+Fast DDS computes a 16-bit host id once per process (`Host::Host()` in `src/cpp/utils/Host.hpp`): an MD5 fold of the IPv4 addresses of the running interfaces, loopback excluded. Every shared-memory locator carries it (`SHMLocator::create_locator()`), and discovery drops a remote shared-memory locator whose id is not this process's (`ProxyDataFilters`, `SHMLocator::is_shm_and_from_this_host()`); it is also bytes 2 and 3 of every GUID prefix (`GuidUtils`, through `SystemInfo::host_id()`). On a robot whose Ethernet gets carrier or a DHCP address while the ROS containers start, processes started before and after the change compute different ids, and a shared-memory-only world splits into islands that never see each other: reproduced on the UGV OS bench (an address added to eth0 and one container restarted, it sees only itself; removed and restarted, it sees all 28 nodes; the same with eth0 down at start). No process dies, and nothing heals it until the processes restart in one address set.
+
+`0005` reads `FASTDDS_HOST_ID` in `Host::Host()`: when it parses with `strtoul` (base 0: decimal, `0x` hex, `0` octal) as 0 to 0xFFFF, that is the host id; unset, empty or unparsable (a warning in the log), the id is the address hash exactly as before. It is opt in and has no default on purpose: a fixed id everywhere would let shared-memory-plus-UDP participants on two different hosts accept each other's shared-memory locators. A deployment sets one value per host in every process that shares its `/dev/shm`. `Host::instance()` is the only source of the id for shared-memory locators and GUID prefixes; the one other computation, `RTPSDomain::createParticipant()`'s hash of the addresses plus `metatraffic_external_unicast_locators`, only renames the GUID prefix of a participant configured with external locators and stays as upstream has it. Humble and Lyrical have the same code but are not rebuilt with it yet: only Jazzy runs on the robots that need it.
 
 ## Evidence
 
@@ -178,7 +184,7 @@ For a private repository, the download needs a read token passed as a BuildKit s
 ## Building and testing locally
 
 ```bash
-./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion6_<arch>.deb
+./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion7_<arch>.deb
 repro/closed_world.sh jazzy                        # stock: the world must close (exit 0)
 repro/closed_world.sh jazzy out/jazzy/*.deb        # patched: it must stay open (exit 0)
 repro/split_world.sh jazzy                         # stock: the world must split within 48 rounds (exit 0)
@@ -189,6 +195,9 @@ LEVER=forced CASES=4 repro/restart_world.sh jazzy                  # stock: the 
 LEVER=forced CASES=4 repro/restart_world.sh jazzy out/jazzy/*.deb  # patched: the world stays whole (exit 0)
 repro/large_message.sh jazzy                       # stock: large samples are cut 60 bytes short (exit 0; Humble and Lyrical stock: whole)
 repro/large_message.sh jazzy out/jazzy/*.deb       # patched: every sample whole and byte-exact (exit 0)
+repro/host_id.sh jazzy                             # stock: an address change splits the world, FASTDDS_HOST_ID or not (exit 0)
+repro/host_id.sh jazzy out/jazzy/*.deb             # patched: with FASTDDS_HOST_ID it stays whole (exit 0; still split without it)
+PLATFORM=linux/arm64 ./build.sh jazzy out/arm64    # the arm64 package on an amd64 host, through qemu (hours)
 ```
 
 Each reproducer reads the expected verdict from the package changelog (the subject of every patch is written into it), so a package with an older patch set is expected to fail the newer reproducers. `blocked_sender.sh` installs gdb in its container (network for apt) and needs `SYS_PTRACE`; `locks.py`, `plant.py` and `wedge.py` read and plant the port state the reproducers use and work on a live host too.
@@ -197,4 +206,4 @@ Each reproducer reads the expected verdict from the package changelog (the subje
 
 ## When to drop this
 
-When upstream ships the fix and it reaches the ROS apt repository for a distro, stop installing the package for that distro and remove its row from `distros.env`. The upstream reports: not filed yet (drafts in `upstream/`). Fast DDS 2.14.7 does not fix any of the four.
+When upstream ships the fix and it reaches the ROS apt repository for a distro, stop installing the package for that distro and remove its row from `distros.env`. The upstream reports: not filed yet (drafts in `upstream/`). Fast DDS 2.14.7 does not fix any of the four, and has no host id override.
