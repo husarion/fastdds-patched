@@ -1,6 +1,6 @@
 # fastdds-patched
 
-Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with four shared-memory transport fixes that upstream does not have yet (the fourth only on Jazzy's Fast DDS 2.14.7, the only version that has that bug), and on Jazzy a fifth change, an opt-in `FASTDDS_HOST_ID` environment variable that pins the host id shared-memory locators carry. Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11), `+husarion6` in v4 (fixes 1 to 3 everywhere, fix 4 on Jazzy), `+husarion7` in v5 (adds fix 5, the `FASTDDS_HOST_ID` override, on Jazzy).
+Fast DDS as the ROS 2 apt repository ships it, rebuilt from the same source package with four shared-memory transport fixes that upstream does not have yet (the fourth only on Jazzy's Fast DDS 2.14.7, the only version that has that bug), and on Jazzy a fifth change, an opt-in `FASTDDS_HOST_ID` environment variable that pins the host id shared-memory locators carry. Each package is a drop-in replacement for `ros-<distro>-fastrtps` (Humble, Jazzy) or `ros-<distro>-fastdds` (Lyrical) at the exact version our images install, with `+husarion<N>` appended to the version: `+husarion1` in v1 (fix 1), `+husarion4` in v2 (fixes 1 to 3; `+husarion2` and `+husarion3` were unreleased test builds), `+husarion5` in v3 (fixes 1 to 3, with Jazzy moved to Fast DDS 2.14.7, the version the ROS repository ships since its sync of 2026-09-11), `+husarion6` in v4 (fixes 1 to 3 everywhere, fix 4 on Jazzy), `+husarion7` in v5 (adds fix 5, the `FASTDDS_HOST_ID` override, on Jazzy), `+husarion8` in v6 (Humble follows the ROS repository's rebuild of 2.6.12 of 2026-10-31; the patches do not change).
 
 The first three bugs hit a host whose ROS processes share one shared-memory world and one of them dies uncleanly (SIGKILL, OOM, a crash). The fourth needs no death: it cuts large messages short whenever a profile allows shared-memory messages above 64 KiB. Each fix is inside a private header: the library's ABI and the shared-memory layout do not change, so patched and unpatched processes can share a world (each fix protects the processes that carry it).
 
@@ -148,6 +148,21 @@ The earlier reproducers on `+husarion6` (Jazzy amd64, same sitting): `closed_wor
 
 Arm64 was not run for v4: the arm64 VM was busy with timing-sensitive work, and a package build there is not light load. The probe that found the bug cut samples the same way on that VM with the v3 package (2.14.7 `+husarion5`), and kept them whole on Humble and Lyrical. The release workflow's arm64 job runs `large_message.sh` on stock and patched before it publishes anything.
 
+## v6: Humble's rebuild of 2.6.12
+
+The ROS repository's Humble sync of 2026-10-31 rebuilt Fast DDS 2.6.12 as `ros-humble-fastrtps 2.6.12-1jammy.20261031.123121`, together with its neighbours (`foonathan-memory-vendor`, `tinyxml*-vendor`, `fastrtps-cmake-module`; `rmw-fastrtps` moved to 6.2.11 on 2026-11-05). The source package is still `2.6.12-1jammy`, so nothing in Fast DDS changed, but the binary's build stamp sorts above v5's Humble package, which was built on the stamp the pinned base image carries (`2.6.12-1jammy.20260723.233918`). An image that upgrades its ROS packages before installing v5 therefore refused it as a downgrade, and the ros2_airlock Humble image stopped building. A new build stamp of an unchanged version forces a release just as a new version does.
+
+No base image carried the new build yet (the newest `ros:humble-ros-base`, built 2026-11-12, still has the 2026-07-23 one), so `distros.env` pins Humble's source version `2.6.12-1jammy`, as v3 did for Jazzy: the build installs the repository's newest build of it and patches that. `patches/2.6.12/` is unchanged; the three patches apply without fuzz (0003's hunk at a one-line offset, as before). The new package is `2.6.12-1jammy.20261031.123121+husarion8` on amd64 (`dpkg --compare-versions` puts it above the repository's build); on arm64 the stamp in front of `+husarion8` is the arm64 build's own. Jazzy (`2.14.7-1noble`) and Lyrical (`3.6.2-1resolute`) did not move in the repository and are rebuilt from the same sources and patches as v5, with the new suffix, since every release takes one N for every distro.
+
+The reproducers had to follow: with a pin, `repro/install.sh` installed the repository's build only when the base image carried no build of the pinned version at all, so the stock runs kept testing the image's 2026-07-23 binary. It now installs the repository's newest build of the pinned version, the one `build.sh` patches.
+
+Humble amd64, 2026-11-19, stock `2.6.12-1jammy.20261031.123121` against `+husarion8`:
+
+| Package | closed_world.sh | split_world.sh | blocked_sender.sh | large_message.sh | host_id.sh |
+|---|---|---|---|---|---|
+| stock | CLOSED 101 s after the load | SPLIT at round 2 | WEDGED 6 of 6 | WHOLE 8 of 8 (not affected) | SPLIT (no 0005 on Humble) |
+| `+husarion8` | OPEN after 600 s | WHOLE 0 of 8 | RECOVERED 0 of 6 | WHOLE 8 of 8 | SPLIT, as expected without 0005 |
+
 ## Every process needs it
 
 A single unpatched process in the shared-memory world keeps writing into its stale slot (fix 1), resets a dead owner's port mutex without the file lock (fix 2), can spin in the recovery loop (fix 3) or cuts its own large messages short (fix 4), so the world stays exposed. Install the package in every image whose processes share the robot's `/dev/shm` world: the driver, rosbridge, cameras, the airlock halves and anything else, including the `ros2` CLI that runs inside those containers.
@@ -184,7 +199,7 @@ For a private repository, the download needs a read token passed as a BuildKit s
 ## Building and testing locally
 
 ```bash
-./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion7_<arch>.deb
+./build.sh jazzy                                   # out/jazzy/ros-jazzy-fastrtps_<ver>+husarion8_<arch>.deb
 repro/closed_world.sh jazzy                        # stock: the world must close (exit 0)
 repro/closed_world.sh jazzy out/jazzy/*.deb        # patched: it must stay open (exit 0)
 repro/split_world.sh jazzy                         # stock: the world must split within 48 rounds (exit 0)

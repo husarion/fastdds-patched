@@ -4,9 +4,9 @@
 # (optional, a second package for the uid-10001 participants).
 #
 # With /pkg/*.deb, that package is installed. Without one, the stock package is
-# tested: the pinned version from the ROS repository when distros.env pins one
-# the base image does not carry (the repository can be ahead of every base
-# image), else the base image's own.
+# tested: when distros.env pins a version, the repository's newest build of it
+# (the repository can be ahead of every base image, with a new version or a new
+# build stamp of the same one), else the base image's own.
 #
 # With /mix/*.deb, that package is unpacked to /opt/mix and MIX_LD names its
 # library directory: the reproducers that run participants as uid 10001 (an
@@ -21,11 +21,17 @@ if ls /pkg/*.deb >/dev/null 2>&1; then
   echo "installed: $(dpkg-query -W -f='${Package} ${Version}' "$(dpkg-deb -f /pkg/*.deb Package)")"
 else
   # PIN is the source version; the binary adds a per-architecture build stamp.
-  if [ -n "${PIN:-}" ] && ! dpkg-query -W -f='${Version}' "$name" | grep -q "^$PIN\(\.\|$\)"; then
+  # The repository can rebuild the same source with a newer stamp (Humble's
+  # 2.6.12 on 2026-10-31), so a base image carrying an older build of the pinned
+  # version is not enough: install the newest one, the binary build.sh patches.
+  if [ -n "${PIN:-}" ]; then
     apt-get update -qq >/dev/null 2>&1
     pin_bin=$(apt-cache madison "$name" | awk -v p="$PIN" '{v=$3} v==p || index(v, p ".")==1 {print v; exit}')
-    { [ -n "$pin_bin" ] && apt-get install -y -qq --no-install-recommends "$name=$pin_bin"; } >/dev/null 2>&1 \
-      || { echo "cannot install the pinned stock $name $PIN"; return 1; }
+    [ -n "$pin_bin" ] || { echo "cannot find the pinned stock $name $PIN"; return 1; }
+    if [ "$(dpkg-query -W -f='${Version}' "$name")" != "$pin_bin" ]; then
+      apt-get install -y -qq --no-install-recommends "$name=$pin_bin" >/dev/null 2>&1 \
+        || { echo "cannot install the pinned stock $name $PIN"; return 1; }
+    fi
   fi
   echo "stock: $name $(dpkg-query -W -f='${Version}' "$name")"
 fi
